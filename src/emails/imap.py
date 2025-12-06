@@ -31,16 +31,22 @@ class EmailInfo:
 class FilterConfig:
     """Email filter configuration."""
     addresses: list[str] = field(default_factory=list)
-    from_domains: list[str] = field(default_factory=list)
+    domains: list[str] = field(default_factory=list)
     from_addresses: list[str] = field(default_factory=list)
+    from_domains: list[str] = field(default_factory=list)
 
     def is_empty(self) -> bool:
-        return not self.addresses and not self.from_domains and not self.from_addresses
+        return (
+            not self.addresses
+            and not self.domains
+            and not self.from_addresses
+            and not self.from_domains
+        )
 
     def build_imap_query(self) -> str:
         """Build IMAP search query from filters.
 
-        Addresses match To/From/Cc, from_domains and from_addresses only match From.
+        addresses/domains match To/From/Cc; from_* only match From.
         """
         terms: list[str] = []
 
@@ -49,11 +55,16 @@ class FilterConfig:
             terms.append(f'FROM "{addr}"')
             terms.append(f'CC "{addr}"')
 
-        for domain in self.from_domains:
+        for domain in self.domains:
+            terms.append(f'TO "{domain}"')
             terms.append(f'FROM "{domain}"')
+            terms.append(f'CC "{domain}"')
 
         for addr in self.from_addresses:
             terms.append(f'FROM "{addr}"')
+
+        for domain in self.from_domains:
+            terms.append(f'FROM "{domain}"')
 
         if not terms:
             return "ALL"

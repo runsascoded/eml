@@ -46,9 +46,10 @@ def progress_handler(info: EmailInfo, status: str) -> None:
 
 
 @command()
-@option('-a', '--address', 'addresses', multiple=True, help="Match To/From/Cc (repeatable)")
+@option('-a', '--address', 'addresses', multiple=True, help="Match To/From/Cc address (repeatable)")
 @option('-c', '--config', 'config_file', type=str, help="YAML config file")
-@option('-d', '--from-domain', 'from_domains', multiple=True, help="Match From domain (repeatable)")
+@option('-d', '--from-domain', 'from_domains', multiple=True, help="Match From domain only (repeatable)")
+@option('-D', '--domain', 'domains', multiple=True, help="Match To/From/Cc domain (repeatable)")
 @option('-e', '--end-date', type=str, help="End date (YYYY-MM-DD)")
 @option('-f', '--folder', type=str, help="Destination folder")
 @option('-F', '--from-address', 'from_addresses', multiple=True, help="Match From address only (repeatable)")
@@ -59,6 +60,7 @@ def progress_handler(info: EmailInfo, status: str) -> None:
 def main(
     addresses: tuple[str, ...],
     config_file: str | None,
+    domains: tuple[str, ...],
     from_domains: tuple[str, ...],
     end_date: str | None,
     folder: str | None,
@@ -77,12 +79,14 @@ def main(
     \b
     Example config.yml (see example.yml):
       filters:
-        addresses:          # Match To/From/Cc
+        addresses:          # Match To/From/Cc (full address)
           - team@googlegroups.com
-        from_domains:       # Match From domain
+        domains:            # Match To/From/Cc (domain)
           - company.com
-        from_addresses:     # Match From address
+        from_addresses:     # Match From only (full address)
           - person@example.com
+        from_domains:       # Match From only (domain)
+          - partner.org
       folder: INBOX
       start_date: 2020-01-01
 
@@ -91,9 +95,10 @@ def main(
 
     \b
     Filter options (at least one required, via -c or flags):
-      -a, --address       Match To, From, or Cc
-      -d, --from-domain   Match From domain only
-      -F, --from-address  Match From address only
+      -a, --address       Match To/From/Cc (full address)
+      -D, --domain        Match To/From/Cc (domain)
+      -F, --from-address  Match From only (full address)
+      -d, --from-domain   Match From only (domain)
 
     \b
     Requires environment variables (or .env file):
@@ -115,17 +120,19 @@ def main(
     # Build filters: CLI args override/extend config file
     cfg_filters = cfg.get("filters", {})
     all_addresses = list(cfg_filters.get("addresses", [])) + list(addresses)
-    all_from_domains = list(cfg_filters.get("from_domains", [])) + list(from_domains)
+    all_domains = list(cfg_filters.get("domains", [])) + list(domains)
     all_from_addresses = list(cfg_filters.get("from_addresses", [])) + list(from_addresses)
+    all_from_domains = list(cfg_filters.get("from_domains", [])) + list(from_domains)
 
     filters = FilterConfig(
         addresses=all_addresses,
-        from_domains=all_from_domains,
+        domains=all_domains,
         from_addresses=all_from_addresses,
+        from_domains=all_from_domains,
     )
 
     if filters.is_empty():
-        err("Error: At least one filter required (-a, -d, -F, or via -c config)")
+        err("Error: At least one filter required (-a, -D, -F, -d, or via -c config)")
         sys.exit(1)
 
     # Other options: CLI overrides config
@@ -187,11 +194,13 @@ def main(
 
     echo("Filters:")
     if all_addresses:
-        echo(f"  To/From/Cc: {', '.join(all_addresses)}")
-    if all_from_domains:
-        echo(f"  From domains: {', '.join(all_from_domains)}")
+        echo(f"  Addresses (To/From/Cc): {', '.join(all_addresses)}")
+    if all_domains:
+        echo(f"  Domains (To/From/Cc): {', '.join(all_domains)}")
     if all_from_addresses:
         echo(f"  From addresses: {', '.join(all_from_addresses)}")
+    if all_from_domains:
+        echo(f"  From domains: {', '.join(all_from_domains)}")
     if parsed_start or parsed_end:
         echo(f"  Date range: {format_date(parsed_start)} to {format_date(parsed_end)}")
     if dry_run:

@@ -2,19 +2,23 @@
 # Copy to your own .yml file and customize
 
 filters:
-  # Addresses to match in To/From/Cc fields
+  # Full addresses to match in To/From/Cc fields
   addresses:
     - team@googlegroups.com
     - alerts@example.com
 
-  # Domains to match in From field only
-  from_domains:
-    - example.com
+  # Domains to match in To/From/Cc fields
+  domains:
+    - company.com
     - partner.org
 
-  # Specific addresses to match in From field only
+  # Full addresses to match in From field only
   from_addresses:
     - ceo@bigcorp.com
+
+  # Domains to match in From field only
+  from_domains:
+    - vendor.com
 
 # Destination folder in target mailbox
 folder: INBOX
