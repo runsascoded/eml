@@ -50,7 +50,7 @@ def progress_handler(info: EmailInfo, status: str) -> None:
 @option('-c', '--config', 'config_file', type=str, help="YAML config file")
 @option('-d', '--from-domain', 'from_domains', multiple=True, help="Match From domain (repeatable)")
 @option('-e', '--end-date', type=str, help="End date (YYYY-MM-DD)")
-@option('-f', '--folder', type=str, help="Destination folder in Zoho")
+@option('-f', '--folder', type=str, help="Destination folder")
 @option('-F', '--from-address', 'from_addresses', multiple=True, help="Match From address only (repeatable)")
 @option('-l', '--limit', type=int, help="Max emails to process")
 @option('-n', '--dry-run', is_flag=True, help="List matching emails without migrating")
@@ -68,29 +68,26 @@ def main(
     start_date: str | None,
     verbose: bool,
 ):
-    """Migrate emails from Gmail to Zoho.
+    """Migrate emails between IMAP mailboxes (e.g., Gmail to Zoho).
 
     \b
     Config file (YAML):
       emails -c config.yml -n
 
     \b
-    Example config.yml:
+    Example config.yml (see example.yml):
       filters:
-        addresses:
-          - address1
-          - address2
-        from_domains:
-          - domain1
-          - domain2
-        from_addresses:
-          - address3
+        addresses:          # Match To/From/Cc
+          - team@googlegroups.com
+        from_domains:       # Match From domain
+          - company.com
+        from_addresses:     # Match From address
+          - person@example.com
       folder: INBOX
-      start_date: 2018-01-01
-      end_date: 2025-03-01
+      start_date: 2020-01-01
 
     \b
-    CLI options override config file values.
+    CLI options extend/override config file values.
 
     \b
     Filter options (at least one required, via -c or flags):
@@ -100,10 +97,10 @@ def main(
 
     \b
     Requires environment variables (or .env file):
-      GMAIL_USER          Gmail address
-      GMAIL_APP_PASSWORD  Gmail app password (not regular password)
-      ZOHO_USER           Zoho email address
-      ZOHO_PASSWORD       Zoho password
+      GMAIL_USER          Source Gmail address
+      GMAIL_APP_PASSWORD  Gmail app password (requires 2FA)
+      ZOHO_USER           Destination Zoho address
+      ZOHO_PASSWORD       Zoho password or app password
     """
     load_dotenv()
 

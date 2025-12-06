@@ -1,8 +1,23 @@
 [project]
 name = "emails"
 version = "0.1.0"
-description = "Migrate emails from Gmail to Zoho via IMAP"
+description = "Migrate emails between IMAP mailboxes with flexible filtering"
 requires-python = ">=3.11"
+readme = "README.md"
+license = "MIT"
+keywords = ["email", "imap", "migration", "gmail", "zoho"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Email",
+]
 dependencies = [
     "click>=8.0",
     "python-dotenv>=1.0",
