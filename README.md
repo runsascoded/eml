@@ -10,7 +10,7 @@ pip install emails
 uv add emails
 ```
 
-## Usage
+## Quick Start
 
 ```bash
 # Create .env with credentials
@@ -21,11 +21,36 @@ ZOHO_USER=you@example.com
 ZOHO_PASSWORD=your-password
 EOF
 
-# Dry run with config file
-emails -c config.yml -n
+# List Gmail folders/labels
+emails folders
+
+# Dry run migration with config file
+emails migrate -c config.yml -n
 
 # Migrate with CLI flags
-emails -a team@googlegroups.com -D company.com -n
+emails migrate -a team@googlegroups.com -D company.com -n
+```
+
+## Commands
+
+### `emails folders`
+
+List folders/labels for an IMAP account:
+
+```bash
+emails folders                          # Gmail (uses GMAIL_USER env)
+emails folders -h zoho -u you@zoho.com  # Zoho
+emails folders -h imap.example.com      # Custom IMAP
+```
+
+### `emails migrate`
+
+Migrate emails between mailboxes:
+
+```bash
+emails migrate -c config.yml -n         # Dry run with config
+emails migrate -c config.yml            # Actually migrate
+emails migrate -a addr@example.com -n   # Filter by address
 ```
 
 ## Configuration
@@ -64,6 +89,26 @@ end_date: 2024-12-31
 - Date range filtering
 - Dry-run mode for testing
 - Progress display with batch limits
+
+## Roadmap
+
+Planned architecture separating pull/push operations with local storage:
+
+```
+Sources (IMAP, mbox, .eml)
+    ↓ pull
+Local Storage (SQLite, Maildir)
+    ↓ push
+Destinations (IMAP, static HTML)
+    ↓ read
+Public Readers (pmail webapp, JSON API)
+```
+
+Planned commands:
+- `emails pull` - Fetch from IMAP to local SQLite/Maildir
+- `emails push` - Send from local storage to destination
+- `emails ls` - Query local storage
+- `emails serve` - Serve web UI for browsing emails (pmail)
 
 ## License
 

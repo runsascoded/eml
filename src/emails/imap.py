@@ -99,6 +99,32 @@ class IMAPClient:
                 pass
             self._conn = None
 
+    def list_folders(self) -> list[tuple[str, str, int | None]]:
+        """List all folders. Returns [(flags, delimiter, name), ...]."""
+        typ, data = self.conn.list()
+        if typ != "OK":
+            raise RuntimeError(f"Failed to list folders: {data}")
+
+        folders = []
+        for item in data:
+            if item is None:
+                continue
+            # Parse: b'(\\HasNoChildren) "/" "INBOX"'
+            decoded = item.decode() if isinstance(item, bytes) else item
+            # Extract flags, delimiter, and name
+            import re
+            match = re.match(r'\(([^)]*)\)\s+"([^"]+)"\s+"?([^"]+)"?', decoded)
+            if match:
+                flags, delim, name = match.groups()
+                # Get message count for folder
+                try:
+                    typ2, data2 = self.conn.select(name, readonly=True)
+                    count = int(data2[0]) if typ2 == "OK" else None
+                except Exception:
+                    count = None
+                folders.append((flags, delim, name, count))
+        return folders
+
     @property
     def conn(self) -> imaplib.IMAP4_SSL:
         if not self._conn:

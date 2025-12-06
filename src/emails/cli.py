@@ -1,15 +1,16 @@
 """CLI for email migration."""
 
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
 
 import yaml
-from click import command, option, echo, style
+from click import group, command, option, argument, echo, style
 from dotenv import load_dotenv
 
-from .imap import EmailInfo, FilterConfig
+from .imap import EmailInfo, FilterConfig, GmailClient, ZohoClient, IMAPClient
 from .migrate import EmailMigrator, MigrationConfig
 
 
@@ -25,6 +26,16 @@ def load_config_file(path: str) -> dict:
     """Load config from YAML file."""
     with open(path) as f:
         return yaml.safe_load(f) or {}
+
+
+def get_imap_client(host: str) -> IMAPClient:
+    """Get appropriate IMAP client for host."""
+    if "gmail" in host.lower():
+        return GmailClient()
+    elif "zoho" in host.lower():
+        return ZohoClient()
+    else:
+        return IMAPClient(host)
 
 
 def progress_handler(info: EmailInfo, status: str) -> None:
@@ -45,7 +56,56 @@ def progress_handler(info: EmailInfo, status: str) -> None:
     echo(f"{icon} {date_str} | {from_short:30} | {subj_short}")
 
 
-@command()
+@group()
+def main():
+    """Email migration tools."""
+    load_dotenv()
+
+
+@main.command()
+@option('-h', '--host', default="gmail", help="IMAP host (gmail, zoho, or hostname)")
+@option('-u', '--user', envvar="GMAIL_USER", help="IMAP username (or GMAIL_USER env)")
+@option('-p', '--password', envvar="GMAIL_APP_PASSWORD", help="IMAP password (or GMAIL_APP_PASSWORD env)")
+def folders(host: str, user: str | None, password: str | None):
+    """List folders/labels for an IMAP account.
+
+    \b
+    Examples:
+      emails folders                     # Uses GMAIL_USER/GMAIL_APP_PASSWORD
+      emails folders -h zoho -u you@example.com
+    """
+    if not user or not password:
+        err("Missing credentials. Set GMAIL_USER/GMAIL_APP_PASSWORD or use -u/-p flags.")
+        sys.exit(1)
+
+    # Resolve host aliases
+    if host == "gmail":
+        client = GmailClient()
+    elif host == "zoho":
+        client = ZohoClient()
+    else:
+        client = IMAPClient(host)
+
+    try:
+        client.connect(user, password)
+        folders_list = client.list_folders()
+
+        echo(f"Folders for {user}:\n")
+        for flags, delim, name, count in sorted(folders_list, key=lambda x: x[2]):
+            count_str = f"({count:,})" if count is not None else ""
+            special = ""
+            if "\\Noselect" in flags:
+                special = " [not selectable]"
+            echo(f"  {name:40} {count_str:>10}{special}")
+
+    except Exception as e:
+        err(f"Error: {e}")
+        sys.exit(1)
+    finally:
+        client.disconnect()
+
+
+@main.command()
 @option('-a', '--address', 'addresses', multiple=True, help="Match To/From/Cc address (repeatable)")
 @option('-c', '--config', 'config_file', type=str, help="YAML config file")
 @option('-d', '--from-domain', 'from_domains', multiple=True, help="Match From domain only (repeatable)")
@@ -57,7 +117,7 @@ def progress_handler(info: EmailInfo, status: str) -> None:
 @option('-n', '--dry-run', is_flag=True, help="List matching emails without migrating")
 @option('-s', '--start-date', type=str, help="Start date (YYYY-MM-DD)")
 @option('-v', '--verbose', is_flag=True, help="Show skipped messages too")
-def main(
+def migrate(
     addresses: tuple[str, ...],
     config_file: str | None,
     domains: tuple[str, ...],
@@ -74,7 +134,7 @@ def main(
 
     \b
     Config file (YAML):
-      emails -c config.yml -n
+      emails migrate -c config.yml -n
 
     \b
     Example config.yml (see example.yml):
@@ -107,8 +167,6 @@ def main(
       ZOHO_USER           Destination Zoho address
       ZOHO_PASSWORD       Zoho password or app password
     """
-    load_dotenv()
-
     # Load config file if provided
     cfg: dict = {}
     if config_file:
