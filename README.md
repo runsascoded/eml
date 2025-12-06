@@ -13,9 +13,9 @@ uv add eml
 ## Quick Start
 
 ```bash
-# Set credentials (or use -u/-p flags)
-export GMAIL_USER=you@gmail.com
-export GMAIL_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
+# Set source credentials (or use -u/-p flags)
+export SRC_USER=you@gmail.com
+export SRC_PASS=xxxx-xxxx-xxxx-xxxx
 
 # List folders
 eml folders
@@ -26,8 +26,10 @@ eml pull -f "MyLabel"
 # Query local storage
 eml ls
 
-# Push to destination
-eml push -h zoho -u you@zoho.com -p yourpass
+# Set destination credentials and push
+export DST_USER=you@zoho.com
+export DST_PASS=your-password
+eml push
 ```
 
 ## Commands
@@ -37,11 +39,10 @@ eml push -h zoho -u you@zoho.com -p yourpass
 List folders/labels, or show info for a specific folder:
 
 ```bash
-eml folders                              # List all folders (uses GMAIL_* env)
+eml folders                              # List all folders
 eml folders "MyLabel"                    # Show message count
 eml folders -s "MyLabel"                 # Show count and total size
-eml folders -h zoho -u you@zoho.com      # Query different account
-eml folders -h imap.example.com -u user  # Any IMAP server
+eml folders -h imap.other.com -u user    # Query different account
 ```
 
 ### `eml pull`
@@ -49,8 +50,8 @@ eml folders -h imap.example.com -u user  # Any IMAP server
 Pull emails from IMAP to local SQLite storage:
 
 ```bash
-eml pull -f "Work"                       # Pull from label (uses GMAIL_* env)
-eml pull -h zoho -u you@zoho.com         # Pull from different account
+eml pull -f "Work"                       # Pull from label
+eml pull -h imap.other.com -u user       # Pull from different account
 eml pull -f "Work" -o work.db            # Custom database path
 eml pull -b 50                           # Checkpoint every 50 messages
 eml pull -n                              # Dry run
@@ -66,8 +67,8 @@ Features:
 Push emails from local storage to IMAP destination:
 
 ```bash
-eml push -h zoho -u you@zoho.com         # Push to Zoho (uses ZOHO_* env)
-eml push -h gmail -u other@gmail.com     # Push to Gmail
+eml push                                 # Push to destination
+eml push -h imap.other.com -u user       # Push to different account
 eml push -f "Archive"                    # Push to specific folder
 eml push -n                              # Dry run
 ```
@@ -99,12 +100,10 @@ Credentials can be set via environment or `-u`/`-p` flags:
 
 | Variable | Used by | Description |
 |----------|---------|-------------|
-| `GMAIL_USER` | `folders`, `pull` | Gmail/source username |
-| `GMAIL_APP_PASSWORD` | `folders`, `pull` | Gmail/source password |
-| `ZOHO_USER` | `push` | Zoho/destination username |
-| `ZOHO_PASSWORD` | `push` | Zoho/destination password |
-
-Override with `-u`/`-p` for any IMAP server.
+| `SRC_USER` | `folders`, `pull` | Source IMAP username |
+| `SRC_PASS` | `folders`, `pull` | Source IMAP password |
+| `DST_USER` | `push` | Destination IMAP username |
+| `DST_PASS` | `push` | Destination IMAP password |
 
 ## Architecture
 

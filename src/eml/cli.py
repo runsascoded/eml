@@ -67,9 +67,9 @@ def main():
 
 @main.command()
 @option('-h', '--host', default="gmail", help="IMAP host (gmail, zoho, or hostname)")
-@option('-p', '--password', envvar="GMAIL_APP_PASSWORD", help="IMAP password (or GMAIL_APP_PASSWORD env)")
+@option('-p', '--password', envvar="SRC_PASS", help="IMAP password (or SRC_PASS env)")
 @option('-s', '--size', is_flag=True, help="Show total size of messages")
-@option('-u', '--user', envvar="GMAIL_USER", help="IMAP username (or GMAIL_USER env)")
+@option('-u', '--user', envvar="SRC_USER", help="IMAP username (or SRC_USER env)")
 @argument('folder', required=False)
 def folders(host: str, password: str | None, size: bool, user: str | None, folder: str | None):
     """List folders/labels, or show count for a specific folder.
@@ -82,7 +82,7 @@ def folders(host: str, password: str | None, size: bool, user: str | None, folde
       eml folders -h zoho -u you@example.com
     """
     if not user or not password:
-        err("Missing credentials. Set GMAIL_USER/GMAIL_APP_PASSWORD or use -u/-p flags.")
+        err("Missing credentials. Set SRC_USER/SRC_PASS env or use -u/-p flags.")
         sys.exit(1)
 
     if host == "gmail":
@@ -129,8 +129,8 @@ def folders(host: str, password: str | None, size: bool, user: str | None, folde
 @option('-l', '--limit', type=int, help="Max emails to fetch")
 @option('-n', '--dry-run', is_flag=True, help="Show what would be fetched without storing")
 @option('-o', '--output', 'db_path', default="emails.db", help="SQLite database path (default: emails.db)")
-@option('-p', '--password', envvar="GMAIL_APP_PASSWORD", help="IMAP password (or GMAIL_APP_PASSWORD env)")
-@option('-u', '--user', envvar="GMAIL_USER", help="IMAP username (or GMAIL_USER env)")
+@option('-p', '--password', envvar="SRC_PASS", help="IMAP password (or SRC_PASS env)")
+@option('-u', '--user', envvar="SRC_USER", help="IMAP username (or SRC_USER env)")
 @option('-v', '--verbose', is_flag=True, help="Show each message fetched")
 def pull(
     checkpoint_interval: int,
@@ -171,13 +171,13 @@ def pull(
     # Resolve source config (CLI overrides config file)
     src_cfg = cfg.get("src", {})
     src_type = src_cfg.get("type", host)
-    src_user = user or src_cfg.get("user") or os.environ.get("GMAIL_USER")
-    src_password = password or src_cfg.get("password") or os.environ.get("GMAIL_APP_PASSWORD")
+    src_user = user or src_cfg.get("user") or os.environ.get("SRC_USER")
+    src_password = password or src_cfg.get("password") or os.environ.get("SRC_PASS")
     src_folder = folder or src_cfg.get("folder")
     db_path = db_path if db_path != "emails.db" else cfg.get("storage", db_path)
 
     if not src_user or not src_password:
-        err("Missing credentials. Set GMAIL_USER/GMAIL_APP_PASSWORD or use -u/-p flags.")
+        err("Missing credentials. Set SRC_USER/SRC_PASS env or use -u/-p flags.")
         sys.exit(1)
 
     # Create IMAP client
@@ -325,8 +325,8 @@ def pull(
 @option('-i', '--input', 'db_path', default="emails.db", help="SQLite database path (default: emails.db)")
 @option('-l', '--limit', type=int, help="Max emails to push")
 @option('-n', '--dry-run', is_flag=True, help="Show what would be pushed without sending")
-@option('-p', '--password', envvar="ZOHO_PASSWORD", help="IMAP password (or ZOHO_PASSWORD env)")
-@option('-u', '--user', envvar="ZOHO_USER", help="IMAP username (or ZOHO_USER env)")
+@option('-p', '--password', envvar="DST_PASS", help="IMAP password (or DST_PASS env)")
+@option('-u', '--user', envvar="DST_USER", help="IMAP username (or DST_USER env)")
 @option('-v', '--verbose', is_flag=True, help="Show each message pushed")
 def push(
     checkpoint_interval: int,
@@ -367,13 +367,13 @@ def push(
     # Resolve destination config (CLI overrides config file)
     dst_cfg = cfg.get("dst", {})
     dst_type = dst_cfg.get("type", host)
-    dst_user = user or dst_cfg.get("user") or os.environ.get("ZOHO_USER")
-    dst_password = password or dst_cfg.get("password") or os.environ.get("ZOHO_PASSWORD")
+    dst_user = user or dst_cfg.get("user") or os.environ.get("DST_USER")
+    dst_password = password or dst_cfg.get("password") or os.environ.get("DST_PASS")
     dst_folder = folder if folder != "INBOX" else dst_cfg.get("folder", folder)
     db_path = db_path if db_path != "emails.db" else cfg.get("storage", db_path)
 
     if not dst_user or not dst_password:
-        err("Missing credentials. Set ZOHO_USER/ZOHO_PASSWORD or use -u/-p flags.")
+        err("Missing credentials. Set DST_USER/DST_PASS env or use -u/-p flags.")
         sys.exit(1)
 
     if not Path(db_path).exists():
