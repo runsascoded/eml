@@ -118,8 +118,7 @@ class IMAPClient:
                 flags, delim, name = match.groups()
                 # Get message count for folder
                 try:
-                    typ2, data2 = self.conn.select(name, readonly=True)
-                    count = int(data2[0]) if typ2 == "OK" else None
+                    count, _ = self.select_folder(name, readonly=True)
                 except Exception:
                     count = None
                 folders.append((flags, delim, name, count))
@@ -131,12 +130,19 @@ class IMAPClient:
             raise RuntimeError("Not connected")
         return self._conn
 
-    def select_folder(self, folder: str, readonly: bool = True) -> int:
-        """Select a folder, return message count."""
+    def select_folder(self, folder: str, readonly: bool = True) -> tuple[int, int]:
+        """Select a folder, return (message_count, uidvalidity)."""
         typ, data = self.conn.select(folder, readonly=readonly)
         if typ != "OK":
             raise RuntimeError(f"Failed to select folder {folder}: {data}")
-        return int(data[0])
+        count = int(data[0])
+        # Get UIDVALIDITY from response
+        uidvalidity = self.conn.response("UIDVALIDITY")[1]
+        if uidvalidity and uidvalidity[0]:
+            uidvalidity = int(uidvalidity[0])
+        else:
+            uidvalidity = 0
+        return count, uidvalidity
 
     def search(self, criteria: str) -> list[bytes]:
         """Search for messages matching criteria, return UIDs."""
@@ -144,6 +150,13 @@ class IMAPClient:
         if typ != "OK":
             raise RuntimeError(f"Search failed: {data}")
         return data[0].split()
+
+    def search_uids_after(self, last_uid: int) -> list[bytes]:
+        """Search for UIDs greater than last_uid (for incremental sync)."""
+        # IMAP UID search: UID <n>:* returns UIDs >= n
+        # We want > last_uid, so use last_uid+1:*
+        criteria = f"UID {last_uid + 1}:*"
+        return self.search(criteria)
 
     def fetch_info(self, uid: bytes) -> EmailInfo:
         """Fetch lightweight email info (headers only)."""
@@ -182,7 +195,7 @@ class IMAPClient:
 
     def get_message_ids(self, folder: str) -> set[str]:
         """Get all Message-IDs in a folder (for deduplication)."""
-        self.select_folder(folder, readonly=True)
+        self.select_folder(folder, readonly=True)  # ignore uidvalidity here
         uids = self.search("ALL")
         message_ids = set()
         for uid in uids:
@@ -210,7 +223,7 @@ class GmailClient(IMAPClient):
 
     def search_by_filters(self, filters: FilterConfig) -> list[bytes]:
         """Search for emails matching filter config."""
-        self.select_folder(self.all_mail_folder, readonly=True)
+        self.select_folder(self.all_mail_folder, readonly=True)  # ignore uidvalidity
         query = filters.build_imap_query()
         return self.search(query)
 

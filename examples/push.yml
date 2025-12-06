@@ -1,0 +1,9 @@
+# Example push config - send from local storage to destination
+# (not yet implemented)
+
+dst:
+  type: zoho
+  # user: you@example.com        # or use ZOHO_USER env
+  folder: INBOX
+
+storage: emails.db

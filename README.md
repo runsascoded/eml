@@ -1,6 +1,6 @@
 # eml
 
-Migrate emails between IMAP mailboxes with flexible filtering.
+Email migration and archival tool with local SQLite storage.
 
 ## Installation
 
@@ -17,18 +17,16 @@ uv add eml
 cat > .env << 'EOF'
 GMAIL_USER=you@gmail.com
 GMAIL_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
-ZOHO_USER=you@example.com
-ZOHO_PASSWORD=your-password
 EOF
 
 # List Gmail folders/labels
 eml folders
 
-# Dry run migration with config file
-eml migrate -c config.yml -n
+# Pull emails from a Gmail label to local storage
+eml pull -f "MyLabel" -o emails.db
 
-# Migrate with CLI flags
-eml migrate -a team@googlegroups.com -D company.com -n
+# Pull with config file
+eml pull -c pull.yml
 ```
 
 ## Commands
@@ -43,72 +41,70 @@ eml folders -h zoho -u you@zoho.com  # Zoho
 eml folders -h imap.example.com      # Custom IMAP
 ```
 
-### `eml migrate`
+### `eml pull`
 
-Migrate emails between mailboxes:
+Pull emails from IMAP to local SQLite storage:
 
 ```bash
-eml migrate -c config.yml -n         # Dry run with config
-eml migrate -c config.yml            # Actually migrate
+eml pull                             # Pull from Gmail All Mail
+eml pull -f "380NWK" -o 380nwk.db    # Pull specific label
+eml pull -c pull.yml                 # Use config file
+eml pull -n                          # Dry run
+eml pull -v                          # Verbose output
+```
+
+Config file (`pull.yml`):
+
+```yaml
+src:
+  type: gmail
+  folder: "380NWK"
+storage: emails.db
+```
+
+### `eml migrate`
+
+Direct IMAP-to-IMAP migration (Gmail → Zoho):
+
+```bash
+eml migrate -c migrate.yml -n        # Dry run
+eml migrate -c migrate.yml           # Actually migrate
 eml migrate -a addr@example.com -n   # Filter by address
 ```
 
-## Configuration
-
-Create a YAML config file (see `example.yml`):
+Config file (`migrate.yml`):
 
 ```yaml
 filters:
-  addresses:          # Match To/From/Cc (full address)
+  addresses:
     - team@googlegroups.com
-  domains:            # Match To/From/Cc (domain)
+  domains:
     - company.com
-  from_addresses:     # Match From only (full address)
-    - person@example.com
-  from_domains:       # Match From only (domain)
-    - vendor.com
-
 folder: INBOX
-start_date: 2020-01-01
-end_date: 2024-12-31
 ```
 
-## Filter Types
-
-| Flag | Config Key | Matches |
-|------|------------|---------|
-| `-a` | `addresses` | To/From/Cc (full address) |
-| `-D` | `domains` | To/From/Cc (domain) |
-| `-F` | `from_addresses` | From only (full address) |
-| `-d` | `from_domains` | From only (domain) |
-
-## Features
-
-- Preserves original dates, threading, and attachments
-- Deduplication by Message-ID
-- Date range filtering
-- Dry-run mode for testing
-- Progress display with batch limits
-
-## Roadmap
-
-Planned architecture separating pull/push operations with local storage:
+## Architecture
 
 ```
 Sources (IMAP, mbox, .eml)
     ↓ pull
-Local Storage (SQLite, Maildir)
+Local Storage (SQLite)
     ↓ push
 Destinations (IMAP, static HTML)
-    ↓ read
-Public Readers (pmail webapp, JSON API)
 ```
 
-Planned commands:
-- `eml pull` - Fetch from IMAP to local SQLite/Maildir
-- `eml push` - Send from local storage to destination
+## Features
+
+- **Pull**: Fetch from IMAP to local SQLite with incremental sync (UIDVALIDITY tracking)
+- **Deduplication**: By Message-ID across sources
+- **Preserves**: Original dates, threading, attachments
+- **Dry-run mode**: Test before committing changes
+
+## Planned
+
+- `eml push` - Send from local storage to IMAP destination
 - `eml ls` - Query local storage
-- `eml serve` - Serve web UI for browsing emails (pmail)
+- `eml serve` - Web UI for browsing emails (pmail)
 
 ## License
 

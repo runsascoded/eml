@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 from .imap import EmailInfo, FilterConfig, GmailClient, ZohoClient, IMAPClient
 from .migrate import EmailMigrator, MigrationConfig
+from .storage import EmailStorage
 
 
 def err(*args, **kwargs):
@@ -71,8 +72,8 @@ def folders(host: str, user: str | None, password: str | None):
 
     \b
     Examples:
-      emails folders                     # Uses GMAIL_USER/GMAIL_APP_PASSWORD
-      emails folders -h zoho -u you@example.com
+      eml folders                        # Uses GMAIL_USER/GMAIL_APP_PASSWORD
+      eml folders -h zoho -u you@example.com
     """
     if not user or not password:
         err("Missing credentials. Set GMAIL_USER/GMAIL_APP_PASSWORD or use -u/-p flags.")
@@ -97,6 +98,192 @@ def folders(host: str, user: str | None, password: str | None):
             if "\\Noselect" in flags:
                 special = " [not selectable]"
             echo(f"  {name:40} {count_str:>10}{special}")
+
+    except Exception as e:
+        err(f"Error: {e}")
+        sys.exit(1)
+    finally:
+        client.disconnect()
+
+
+@main.command()
+@option('-c', '--config', 'config_file', type=str, help="YAML config file")
+@option('-f', '--folder', type=str, help="Source folder (default: [Gmail]/All Mail for gmail)")
+@option('-h', '--host', default="gmail", help="IMAP host (gmail, zoho, or hostname)")
+@option('-l', '--limit', type=int, help="Max emails to fetch")
+@option('-n', '--dry-run', is_flag=True, help="Show what would be fetched without storing")
+@option('-o', '--output', 'db_path', default="emails.db", help="SQLite database path (default: emails.db)")
+@option('-p', '--password', envvar="GMAIL_APP_PASSWORD", help="IMAP password (or GMAIL_APP_PASSWORD env)")
+@option('-u', '--user', envvar="GMAIL_USER", help="IMAP username (or GMAIL_USER env)")
+@option('-v', '--verbose', is_flag=True, help="Show each message fetched")
+def pull(
+    config_file: str | None,
+    folder: str | None,
+    host: str,
+    limit: int | None,
+    dry_run: bool,
+    db_path: str,
+    password: str | None,
+    user: str | None,
+    verbose: bool,
+):
+    """Pull emails from IMAP to local SQLite storage.
+
+    \b
+    Examples:
+      eml pull                              # Pull from Gmail All Mail
+      eml pull -f "380NWK" -o 380nwk.db     # Pull specific label
+      eml pull -c pull.yml                  # Use config file
+      eml pull -n                           # Dry run
+
+    \b
+    Config file (pull.yml):
+      src:
+        type: gmail
+        folder: "380NWK"
+      storage: emails.db
+    """
+    # Load config file if provided
+    cfg: dict = {}
+    if config_file:
+        if not Path(config_file).exists():
+            err(f"Config file not found: {config_file}")
+            sys.exit(1)
+        cfg = load_config_file(config_file)
+
+    # Resolve source config (CLI overrides config file)
+    src_cfg = cfg.get("src", {})
+    src_type = src_cfg.get("type", host)
+    src_user = user or src_cfg.get("user") or os.environ.get("GMAIL_USER")
+    src_password = password or src_cfg.get("password") or os.environ.get("GMAIL_APP_PASSWORD")
+    src_folder = folder or src_cfg.get("folder")
+    db_path = db_path if db_path != "emails.db" else cfg.get("storage", db_path)
+
+    if not src_user or not src_password:
+        err("Missing credentials. Set GMAIL_USER/GMAIL_APP_PASSWORD or use -u/-p flags.")
+        sys.exit(1)
+
+    # Create IMAP client
+    if src_type == "gmail" or "gmail" in src_type.lower():
+        client = GmailClient()
+        src_folder = src_folder or client.all_mail_folder
+    elif src_type == "zoho" or "zoho" in src_type.lower():
+        client = ZohoClient()
+        src_folder = src_folder or "INBOX"
+    else:
+        client = IMAPClient(src_type)
+        src_folder = src_folder or "INBOX"
+
+    echo(f"Source: {src_type} ({src_user})")
+    echo(f"Folder: {src_folder}")
+    echo(f"Storage: {db_path}")
+    if dry_run:
+        echo(style("DRY RUN - no changes will be made", fg="yellow"))
+    echo()
+
+    try:
+        client.connect(src_user, src_password)
+        count, uidvalidity = client.select_folder(src_folder, readonly=True)
+        echo(f"Folder has {count:,} messages (UIDVALIDITY: {uidvalidity})")
+
+        # Open storage
+        storage = EmailStorage(db_path)
+        if not dry_run:
+            storage.connect()
+
+        # Check sync state
+        stored_uidvalidity, last_uid = (None, None)
+        if not dry_run:
+            stored_uidvalidity, last_uid = storage.get_sync_state(src_type, src_user, src_folder)
+
+        if stored_uidvalidity and stored_uidvalidity != uidvalidity:
+            echo(style(f"UIDVALIDITY changed ({stored_uidvalidity} → {uidvalidity}), doing full sync", fg="yellow"))
+            if not dry_run:
+                storage.clear_sync_state(src_type, src_user, src_folder)
+            last_uid = None
+
+        # Get UIDs to fetch
+        if last_uid:
+            echo(f"Incremental sync from UID {last_uid}")
+            uids = client.search_uids_after(last_uid)
+        else:
+            echo("Full sync")
+            uids = client.search("ALL")
+
+        if limit:
+            uids = uids[:limit]
+
+        echo(f"Fetching {len(uids)} messages...")
+        echo()
+
+        fetched = 0
+        skipped = 0
+        failed = 0
+        max_uid = last_uid or 0
+
+        for uid in uids:
+            uid_int = int(uid)
+            max_uid = max(max_uid, uid_int)
+
+            try:
+                info = client.fetch_info(uid)
+            except Exception as e:
+                failed += 1
+                if verbose:
+                    echo(style(f"✗ UID {uid}: {e}", fg="red"))
+                continue
+
+            # Check if already stored
+            if not dry_run and storage.has_message(info.message_id):
+                skipped += 1
+                if verbose:
+                    echo(style(f"· {format_date(info.date)} | {info.subject[:50]} [duplicate]", fg="bright_black"))
+                continue
+
+            if dry_run:
+                if verbose:
+                    echo(f"○ {format_date(info.date)} | {info.from_addr[:30]:30} | {info.subject[:40]}")
+                fetched += 1
+                continue
+
+            # Fetch full message and store
+            try:
+                raw = client.fetch_raw(uid)
+                storage.add_message(
+                    message_id=info.message_id,
+                    raw=raw,
+                    date=info.date,
+                    from_addr=info.from_addr,
+                    to_addr=info.to_addr,
+                    cc_addr=info.cc_addr,
+                    subject=info.subject,
+                    source_folder=src_folder,
+                    source_uid=str(uid_int),
+                )
+                fetched += 1
+                if verbose:
+                    echo(style(f"✓ {format_date(info.date)} | {info.from_addr[:30]:30} | {info.subject[:40]}", fg="green"))
+            except Exception as e:
+                failed += 1
+                if verbose:
+                    echo(style(f"✗ {info.subject[:50]}: {e}", fg="red"))
+
+        # Update sync state
+        if not dry_run and max_uid > 0:
+            storage.set_sync_state(src_type, src_user, src_folder, uidvalidity, max_uid)
+
+        echo()
+        if dry_run:
+            echo(f"Would fetch: {fetched}")
+        else:
+            echo(f"Fetched: {fetched}")
+            echo(f"Skipped (duplicate): {skipped}")
+            echo(f"Total in storage: {storage.count():,}")
+        if failed:
+            echo(f"Failed: {failed}")
+
+        if not dry_run:
+            storage.disconnect()
 
     except Exception as e:
         err(f"Error: {e}")
@@ -134,7 +321,7 @@ def migrate(
 
     \b
     Config file (YAML):
-      emails migrate -c config.yml -n
+      eml migrate -c config.yml -n
 
     \b
     Example config.yml (see example.yml):

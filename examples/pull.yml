@@ -1,0 +1,11 @@
+# Example pull config - fetch from Gmail to local SQLite
+
+src:
+  type: gmail
+  # user: you@gmail.com          # or use GMAIL_USER env
+  folder: "[Gmail]/All Mail"      # or specific label like "380NWK"
+
+storage: emails.db
+
+# Optional: limit for testing
+# limit: 100
