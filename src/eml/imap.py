@@ -2,6 +2,7 @@
 
 import imaplib
 import email
+import re
 from email.policy import default as email_policy
 from email.utils import parsedate_to_datetime
 from dataclasses import dataclass, field
@@ -112,7 +113,6 @@ class IMAPClient:
             # Parse: b'(\\HasNoChildren) "/" "INBOX"'
             decoded = item.decode() if isinstance(item, bytes) else item
             # Extract flags, delimiter, and name
-            import re
             match = re.match(r'\(([^)]*)\)\s+"([^"]+)"\s+"?([^"]+)"?', decoded)
             if match:
                 flags, delim, name = match.groups()
@@ -157,6 +157,24 @@ class IMAPClient:
         # We want > last_uid, so use last_uid+1:*
         criteria = f"UID {last_uid + 1}:*"
         return self.search(criteria)
+
+    def get_folder_size(self) -> int:
+        """Get total size of all messages in currently selected folder."""
+        typ, data = self.conn.fetch("1:*", "(RFC822.SIZE)")
+        if typ != "OK":
+            return 0
+        total = 0
+        for item in data:
+            if item and isinstance(item, tuple):
+                # Parse: b'1 (RFC822.SIZE 12345)'
+                match = re.search(rb'RFC822\.SIZE\s+(\d+)', item[0])
+                if match:
+                    total += int(match.group(1))
+            elif item and isinstance(item, bytes):
+                match = re.search(rb'RFC822\.SIZE\s+(\d+)', item)
+                if match:
+                    total += int(match.group(1))
+        return total
 
     def fetch_info(self, uid: bytes) -> EmailInfo:
         """Fetch lightweight email info (headers only)."""

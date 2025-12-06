@@ -6,8 +6,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import humanize
 import yaml
-from click import group, command, option, argument, echo, style
+from click import argument, echo, group, option, style
 from dotenv import load_dotenv
 
 from .imap import EmailInfo, FilterConfig, GmailClient, ZohoClient, IMAPClient
@@ -65,21 +66,24 @@ def main():
 
 @main.command()
 @option('-h', '--host', default="gmail", help="IMAP host (gmail, zoho, or hostname)")
-@option('-u', '--user', envvar="GMAIL_USER", help="IMAP username (or GMAIL_USER env)")
 @option('-p', '--password', envvar="GMAIL_APP_PASSWORD", help="IMAP password (or GMAIL_APP_PASSWORD env)")
-def folders(host: str, user: str | None, password: str | None):
-    """List folders/labels for an IMAP account.
+@option('-s', '--size', is_flag=True, help="Show total size of messages")
+@option('-u', '--user', envvar="GMAIL_USER", help="IMAP username (or GMAIL_USER env)")
+@argument('folder', required=False)
+def folders(host: str, password: str | None, size: bool, user: str | None, folder: str | None):
+    """List folders/labels, or show count for a specific folder.
 
     \b
     Examples:
-      eml folders                        # Uses GMAIL_USER/GMAIL_APP_PASSWORD
+      eml folders                        # List all folders
+      eml folders INBOX                  # Show count for INBOX
+      eml folders -s "Work"              # Show count and size
       eml folders -h zoho -u you@example.com
     """
     if not user or not password:
         err("Missing credentials. Set GMAIL_USER/GMAIL_APP_PASSWORD or use -u/-p flags.")
         sys.exit(1)
 
-    # Resolve host aliases
     if host == "gmail":
         client = GmailClient()
     elif host == "zoho":
@@ -89,15 +93,25 @@ def folders(host: str, user: str | None, password: str | None):
 
     try:
         client.connect(user, password)
-        folders_list = client.list_folders()
 
-        echo(f"Folders for {user}:\n")
-        for flags, delim, name, count in sorted(folders_list, key=lambda x: x[2]):
-            count_str = f"({count:,})" if count is not None else ""
-            special = ""
-            if "\\Noselect" in flags:
-                special = " [not selectable]"
-            echo(f"  {name:40} {count_str:>10}{special}")
+        if folder:
+            # Show count for specific folder
+            msg_count, _ = client.select_folder(folder, readonly=True)
+            if size:
+                total_size = client.get_folder_size()
+                echo(f"{folder}: {msg_count:,} messages ({humanize.naturalsize(total_size)})")
+            else:
+                echo(f"{folder}: {msg_count:,} messages")
+        else:
+            # List all folders
+            folders_list = client.list_folders()
+            echo(f"Folders for {user}:\n")
+            for flags, delim, name, count in sorted(folders_list, key=lambda x: x[2]):
+                count_str = f"({count:,})" if count is not None else ""
+                special = ""
+                if "\\Noselect" in flags:
+                    special = " [not selectable]"
+                echo(f"  {name:40} {count_str:>10}{special}")
 
     except Exception as e:
         err(f"Error: {e}")
