@@ -3,7 +3,7 @@
 src:
   type: gmail
   # user: you@gmail.com          # or use GMAIL_USER env
-  folder: "[Gmail]/All Mail"      # or specific label like "380NWK"
+  folder: "[Gmail]/All Mail"      # or specific label like "Work"
 
 storage: emails.db
 

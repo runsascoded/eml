@@ -132,7 +132,7 @@ def pull(
     \b
     Examples:
       eml pull                              # Pull from Gmail All Mail
-      eml pull -f "380NWK" -o 380nwk.db     # Pull specific label
+      eml pull -f "Work" -o work.db         # Pull specific label
       eml pull -c pull.yml                  # Use config file
       eml pull -n                           # Dry run
 
@@ -140,7 +140,7 @@ def pull(
     Config file (pull.yml):
       src:
         type: gmail
-        folder: "380NWK"
+        folder: "Work"
       storage: emails.db
     """
     # Load config file if provided
