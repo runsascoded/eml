@@ -550,6 +550,42 @@ def ls(
 
 
 @main.command()
+@option('-h', '--host', default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
+@option('-i', '--input', 'db_path', default="emails.db", help="SQLite database path (default: emails.db)")
+@option('-p', '--port', default=5000, help="Port to run on (default: 5000)")
+def serve(host: str, db_path: str, port: int):
+    """Start pmail web UI for browsing emails.
+
+    \b
+    Examples:
+      eml serve                           # Start on http://127.0.0.1:5000
+      eml serve -p 8080                   # Use different port
+      eml serve -i work.db                # Use different database
+      eml serve -h 0.0.0.0                # Listen on all interfaces
+    """
+    if not Path(db_path).exists():
+        err(f"Database not found: {db_path}")
+        sys.exit(1)
+
+    # Import Flask app and configure
+    www_path = Path(__file__).parent.parent.parent / "www"
+    sys.path.insert(0, str(www_path))
+
+    try:
+        from app import app, DB_PATH
+        import app as app_module
+        app_module.DB_PATH = Path(db_path).absolute()
+
+        echo(f"Starting pmail on http://{host}:{port}")
+        echo(f"Database: {db_path}")
+        app.run(host=host, port=port, debug=True)
+    except ImportError as e:
+        err(f"Failed to import pmail app: {e}")
+        err("Make sure www/app.py exists")
+        sys.exit(1)
+
+
+@main.command()
 @option('-a', '--address', 'addresses', multiple=True, help="Match To/From/Cc address (repeatable)")
 @option('-c', '--config', 'config_file', type=str, help="YAML config file")
 @option('-d', '--from-domain', 'from_domains', multiple=True, help="Match From domain only (repeatable)")

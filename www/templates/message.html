@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block title %}{{ headers.Subject or '(no subject)' }} - pmail{% endblock %}
+
+{% block content %}
+<a href="/" class="back-link">&laquo; Back to list</a>
+
+<div class="message-view">
+    <div class="message-headers">
+        <div class="header-row">
+            <span class="header-label">From:</span>
+            <span>{{ headers.From }}</span>
+        </div>
+        <div class="header-row">
+            <span class="header-label">To:</span>
+            <span>{{ headers.To }}</span>
+        </div>
+        {% if headers.Cc %}
+        <div class="header-row">
+            <span class="header-label">Cc:</span>
+            <span>{{ headers.Cc }}</span>
+        </div>
+        {% endif %}
+        <div class="header-row">
+            <span class="header-label">Date:</span>
+            <span>{{ headers.Date }}</span>
+        </div>
+        <div class="header-row">
+            <span class="header-label">Subject:</span>
+            <span><strong>{{ headers.Subject or '(no subject)' }}</strong></span>
+        </div>
+    </div>
+
+    <div class="message-body">{{ body }}</div>
+
+    {% if attachments %}
+    <div class="attachments">
+        <strong>Attachments:</strong><br><br>
+        {% for att in attachments %}
+        <span class="attachment">
+            {{ att.filename }} ({{ att.content_type }}, {{ (att.size / 1024)|round(1) }}KB)
+        </span>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

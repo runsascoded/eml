@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+
+{% block title %}pmail{% endblock %}
+
+{% block content %}
+<h1>pmail</h1>
+
+<form class="search-form" method="get">
+    <input type="text" name="q" value="{{ q }}" placeholder="Search emails...">
+    <button type="submit">Search</button>
+    {% if q %}<a href="/">Clear</a>{% endif %}
+</form>
+
+<p class="stats">
+    {% if q %}
+        Found {{ total }} messages matching "{{ q }}"
+    {% else %}
+        {{ total }} messages
+    {% endif %}
+</p>
+
+<div class="message-list">
+    {% for msg in messages %}
+    <a href="/message/{{ msg.id }}" class="message-row">
+        <span class="msg-date">{{ msg.date[:10] if msg.date else '?' }}</span>
+        <span class="msg-from">{{ msg.from_addr[:30] if msg.from_addr else '?' }}</span>
+        <span class="msg-subject">{{ msg.subject or '(no subject)' }}</span>
+    </a>
+    {% else %}
+    <div class="message-row">No messages found.</div>
+    {% endfor %}
+</div>
+
+{% if total_pages > 1 %}
+<div class="pagination">
+    {% if page > 1 %}
+        <a href="?q={{ q }}&page={{ page - 1 }}">&laquo; Prev</a>
+    {% endif %}
+
+    {% for p in range(1, total_pages + 1) %}
+        {% if p == page %}
+            <span class="current">{{ p }}</span>
+        {% elif p <= 3 or p > total_pages - 2 or (p >= page - 1 and p <= page + 1) %}
+            <a href="?q={{ q }}&page={{ p }}">{{ p }}</a>
+        {% elif p == 4 or p == total_pages - 2 %}
+            <span>...</span>
+        {% endif %}
+    {% endfor %}
+
+    {% if page < total_pages %}
+        <a href="?q={{ q }}&page={{ page + 1 }}">Next &raquo;</a>
+    {% endif %}
+</div>
+{% endif %}
+{% endblock %}
