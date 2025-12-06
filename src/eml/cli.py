@@ -1,5 +1,6 @@
 """CLI for email migration."""
 
+import imaplib
 import os
 import re
 import sys
@@ -314,6 +315,238 @@ def pull(
         sys.exit(1)
     finally:
         client.disconnect()
+
+
+@main.command()
+@option('-b', '--batch', 'checkpoint_interval', default=100, help="Mark progress every N messages (default: 100)")
+@option('-c', '--config', 'config_file', type=str, help="YAML config file")
+@option('-f', '--folder', default="INBOX", help="Destination folder (default: INBOX)")
+@option('-h', '--host', default="zoho", help="IMAP host (zoho, gmail, or hostname)")
+@option('-i', '--input', 'db_path', default="emails.db", help="SQLite database path (default: emails.db)")
+@option('-l', '--limit', type=int, help="Max emails to push")
+@option('-n', '--dry-run', is_flag=True, help="Show what would be pushed without sending")
+@option('-p', '--password', envvar="ZOHO_PASSWORD", help="IMAP password (or ZOHO_PASSWORD env)")
+@option('-u', '--user', envvar="ZOHO_USER", help="IMAP username (or ZOHO_USER env)")
+@option('-v', '--verbose', is_flag=True, help="Show each message pushed")
+def push(
+    checkpoint_interval: int,
+    config_file: str | None,
+    folder: str,
+    host: str,
+    db_path: str,
+    limit: int | None,
+    dry_run: bool,
+    password: str | None,
+    user: str | None,
+    verbose: bool,
+):
+    """Push emails from local SQLite storage to IMAP destination.
+
+    \b
+    Examples:
+      eml push                              # Push to Zoho INBOX
+      eml push -f "Archive" -v              # Push to Archive folder, verbose
+      eml push -c push.yml                  # Use config file
+      eml push -n                           # Dry run
+
+    \b
+    Config file (push.yml):
+      dst:
+        type: zoho
+        folder: "INBOX"
+      storage: emails.db
+    """
+    # Load config file if provided
+    cfg: dict = {}
+    if config_file:
+        if not Path(config_file).exists():
+            err(f"Config file not found: {config_file}")
+            sys.exit(1)
+        cfg = load_config_file(config_file)
+
+    # Resolve destination config (CLI overrides config file)
+    dst_cfg = cfg.get("dst", {})
+    dst_type = dst_cfg.get("type", host)
+    dst_user = user or dst_cfg.get("user") or os.environ.get("ZOHO_USER")
+    dst_password = password or dst_cfg.get("password") or os.environ.get("ZOHO_PASSWORD")
+    dst_folder = folder if folder != "INBOX" else dst_cfg.get("folder", folder)
+    db_path = db_path if db_path != "emails.db" else cfg.get("storage", db_path)
+
+    if not dst_user or not dst_password:
+        err("Missing credentials. Set ZOHO_USER/ZOHO_PASSWORD or use -u/-p flags.")
+        sys.exit(1)
+
+    if not Path(db_path).exists():
+        err(f"Database not found: {db_path}")
+        sys.exit(1)
+
+    # Create IMAP client
+    if dst_type == "zoho" or "zoho" in dst_type.lower():
+        client = ZohoClient()
+    elif dst_type == "gmail" or "gmail" in dst_type.lower():
+        client = GmailClient()
+    else:
+        client = IMAPClient(dst_type)
+
+    echo(f"Storage: {db_path}")
+    echo(f"Destination: {dst_type} ({dst_user})")
+    echo(f"Folder: {dst_folder}")
+    if dry_run:
+        echo(style("DRY RUN - no changes will be made", fg="yellow"))
+    echo()
+
+    try:
+        # Open storage
+        storage = EmailStorage(db_path)
+        storage.connect()
+
+        total = storage.count()
+        already_pushed = storage.count_pushed(dst_type, dst_user, dst_folder)
+        echo(f"Total messages in storage: {total:,}")
+        echo(f"Already pushed to destination: {already_pushed:,}")
+
+        # Get unpushed messages
+        unpushed = list(storage.iter_unpushed(dst_type, dst_user, dst_folder))
+        if limit:
+            unpushed = unpushed[:limit]
+
+        echo(f"To push: {len(unpushed):,}")
+        echo()
+
+        if not unpushed:
+            echo("Nothing to push.")
+            return
+
+        if not dry_run:
+            client.connect(dst_user, dst_password)
+            # Create folder if needed (Zoho-specific)
+            if hasattr(client, 'create_folder'):
+                client.create_folder(dst_folder)
+
+        pushed = 0
+        failed = 0
+
+        with progressbar(unpushed, label="Pushing", show_pos=True) as bar:
+            for i, msg in enumerate(bar):
+                if dry_run:
+                    if verbose:
+                        echo(f"\n○ {format_date(msg.date)} | {msg.from_addr[:30]:30} | {msg.subject[:40]}")
+                    pushed += 1
+                    continue
+
+                try:
+                    # Append message to destination
+                    success = client.conn.append(
+                        dst_folder,
+                        None,  # flags
+                        imaplib.Time2Internaldate(msg.date.timetuple()) if msg.date else None,
+                        msg.raw,
+                    )
+                    if success[0] == "OK":
+                        storage.mark_pushed(msg.message_id, dst_type, dst_user, dst_folder)
+                        pushed += 1
+                        if verbose:
+                            echo(style(f"\n✓ {format_date(msg.date)} | {msg.from_addr[:30]:30} | {msg.subject[:40]}", fg="green"))
+                    else:
+                        failed += 1
+                        if verbose:
+                            echo(style(f"\n✗ {msg.subject[:50]}: {success}", fg="red"))
+                except Exception as e:
+                    failed += 1
+                    if verbose:
+                        echo(style(f"\n✗ {msg.subject[:50]}: {e}", fg="red"))
+
+        echo()
+        if dry_run:
+            echo(f"Would push: {pushed}")
+        else:
+            echo(f"Pushed: {pushed}")
+            echo(f"Failed: {failed}")
+
+        storage.disconnect()
+
+    except Exception as e:
+        err(f"Error: {e}")
+        sys.exit(1)
+    finally:
+        if not dry_run and client._conn:
+            client.disconnect()
+
+
+@main.command()
+@option('-f', '--from', 'from_filter', type=str, help="Filter by From address (substring match)")
+@option('-i', '--input', 'db_path', default="emails.db", help="SQLite database path (default: emails.db)")
+@option('-l', '--limit', default=20, help="Max messages to show (default: 20)")
+@option('-s', '--subject', 'subject_filter', type=str, help="Filter by subject (substring match)")
+@argument('query', required=False)
+def ls(
+    from_filter: str | None,
+    db_path: str,
+    limit: int,
+    subject_filter: str | None,
+    query: str | None,
+):
+    """List messages in local storage.
+
+    \b
+    Examples:
+      eml ls                              # List recent messages
+      eml ls -l 50                        # Show 50 messages
+      eml ls -f "john@"                   # Filter by From
+      eml ls -s "invoice"                 # Filter by subject
+      eml ls "search term"                # Search in From/Subject
+    """
+    if not Path(db_path).exists():
+        err(f"Database not found: {db_path}")
+        sys.exit(1)
+
+    try:
+        storage = EmailStorage(db_path)
+        storage.connect()
+
+        total = storage.count()
+        echo(f"Total messages: {total:,}\n")
+
+        # Build query
+        sql = "SELECT * FROM messages WHERE 1=1"
+        params: list = []
+
+        if from_filter:
+            sql += " AND from_addr LIKE ?"
+            params.append(f"%{from_filter}%")
+
+        if subject_filter:
+            sql += " AND subject LIKE ?"
+            params.append(f"%{subject_filter}%")
+
+        if query:
+            sql += " AND (from_addr LIKE ? OR subject LIKE ?)"
+            params.extend([f"%{query}%", f"%{query}%"])
+
+        sql += " ORDER BY date DESC LIMIT ?"
+        params.append(limit)
+
+        cur = storage.conn.execute(sql, params)
+        rows = cur.fetchall()
+
+        if not rows:
+            echo("No messages found.")
+            return
+
+        for row in rows:
+            date_str = row["date"][:10] if row["date"] else "?"
+            from_short = (row["from_addr"] or "?")[:35]
+            subj_short = (row["subject"] or "(no subject)")[:45]
+            echo(f"{date_str} | {from_short:35} | {subj_short}")
+
+        if len(rows) == limit:
+            echo(f"\n(showing first {limit}, use -l to see more)")
+
+        storage.disconnect()
+
+    except Exception as e:
+        err(f"Error: {e}")
+        sys.exit(1)
 
 
 @main.command()

@@ -13,32 +13,35 @@ uv add eml
 ## Quick Start
 
 ```bash
-# Create .env with credentials
-cat > .env << 'EOF'
-GMAIL_USER=you@gmail.com
-GMAIL_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
-EOF
+# Set credentials (or use -u/-p flags)
+export GMAIL_USER=you@gmail.com
+export GMAIL_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
 
-# List Gmail folders/labels
+# List folders
 eml folders
 
-# Pull emails from a Gmail label to local storage
-eml pull -f "MyLabel" -o emails.db
+# Pull emails to local storage
+eml pull -f "MyLabel"
 
-# Pull with config file
-eml pull -c pull.yml
+# Query local storage
+eml ls
+
+# Push to destination
+eml push -h zoho -u you@zoho.com -p yourpass
 ```
 
 ## Commands
 
-### `eml folders`
+### `eml folders [FOLDER]`
 
-List folders/labels for an IMAP account:
+List folders/labels, or show info for a specific folder:
 
 ```bash
-eml folders                          # Gmail (uses GMAIL_USER env)
-eml folders -h zoho -u you@zoho.com  # Zoho
-eml folders -h imap.example.com      # Custom IMAP
+eml folders                              # List all folders (uses GMAIL_* env)
+eml folders "MyLabel"                    # Show message count
+eml folders -s "MyLabel"                 # Show count and total size
+eml folders -h zoho -u you@zoho.com      # Query different account
+eml folders -h imap.example.com -u user  # Any IMAP server
 ```
 
 ### `eml pull`
@@ -46,64 +49,83 @@ eml folders -h imap.example.com      # Custom IMAP
 Pull emails from IMAP to local SQLite storage:
 
 ```bash
-eml pull                             # Pull from Gmail All Mail
-eml pull -f "Work" -o work.db        # Pull specific label
-eml pull -c pull.yml                 # Use config file
-eml pull -n                          # Dry run
-eml pull -v                          # Verbose output
+eml pull -f "Work"                       # Pull from label (uses GMAIL_* env)
+eml pull -h zoho -u you@zoho.com         # Pull from different account
+eml pull -f "Work" -o work.db            # Custom database path
+eml pull -b 50                           # Checkpoint every 50 messages
+eml pull -n                              # Dry run
 ```
 
-Config file (`pull.yml`):
+Features:
+- Progress bar with message count
+- Incremental sync (only fetches new messages)
+- Checkpoint saves every N messages (crash-safe)
 
-```yaml
-src:
-  type: gmail
-  folder: "Work"
-storage: emails.db
+### `eml push`
+
+Push emails from local storage to IMAP destination:
+
+```bash
+eml push -h zoho -u you@zoho.com         # Push to Zoho (uses ZOHO_* env)
+eml push -h gmail -u other@gmail.com     # Push to Gmail
+eml push -f "Archive"                    # Push to specific folder
+eml push -n                              # Dry run
+```
+
+### `eml ls`
+
+Query local storage:
+
+```bash
+eml ls                                   # List recent messages
+eml ls -l 50                             # Show 50 messages
+eml ls -f "john@"                        # Filter by From
+eml ls -s "invoice"                      # Filter by subject
+eml ls "search term"                     # Search From/Subject
 ```
 
 ### `eml migrate`
 
-Direct IMAP-to-IMAP migration (Gmail → Zoho):
+Direct IMAP-to-IMAP migration (without local storage):
 
 ```bash
-eml migrate -c migrate.yml -n        # Dry run
-eml migrate -c migrate.yml           # Actually migrate
-eml migrate -a addr@example.com -n   # Filter by address
+eml migrate -c migrate.yml -n            # Dry run with config
+eml migrate -a addr@example.com -n       # Filter by address
 ```
 
-Config file (`migrate.yml`):
+## Environment Variables
 
-```yaml
-filters:
-  addresses:
-    - team@googlegroups.com
-  domains:
-    - company.com
-folder: INBOX
-```
+Credentials can be set via environment or `-u`/`-p` flags:
+
+| Variable | Used by | Description |
+|----------|---------|-------------|
+| `GMAIL_USER` | `folders`, `pull` | Gmail/source username |
+| `GMAIL_APP_PASSWORD` | `folders`, `pull` | Gmail/source password |
+| `ZOHO_USER` | `push` | Zoho/destination username |
+| `ZOHO_PASSWORD` | `push` | Zoho/destination password |
+
+Override with `-u`/`-p` for any IMAP server.
 
 ## Architecture
 
 ```
-Sources (IMAP, mbox, .eml)
+Source IMAP
     ↓ pull
 Local Storage (SQLite)
     ↓ push
-Destinations (IMAP, static HTML)
+Destination IMAP
 ```
 
 ## Features
 
-- **Pull**: Fetch from IMAP to local SQLite with incremental sync (UIDVALIDITY tracking)
+- **Incremental sync**: Tracks UIDVALIDITY and last UID per folder
+- **Checkpointing**: Saves progress periodically, crash-safe
 - **Deduplication**: By Message-ID across sources
 - **Preserves**: Original dates, threading, attachments
-- **Dry-run mode**: Test before committing changes
+- **Progress bar**: Visual feedback for long operations
 
 ## Planned
 
-- `eml push` - Send from local storage to IMAP destination
-- `eml ls` - Query local storage
 - `eml serve` - Web UI for browsing emails (pmail)
 
 ## License

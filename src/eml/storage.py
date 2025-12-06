@@ -79,6 +79,18 @@ class EmailStorage:
                 last_sync TEXT,
                 UNIQUE(source_type, source_user, folder)
             );
+
+            CREATE TABLE IF NOT EXISTS push_state (
+                id INTEGER PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                dest_type TEXT NOT NULL,
+                dest_user TEXT NOT NULL,
+                dest_folder TEXT NOT NULL,
+                pushed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(message_id, dest_type, dest_user, dest_folder)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_push_state_dest ON push_state(dest_type, dest_user, dest_folder);
         """)
         self.conn.commit()
 
@@ -208,6 +220,70 @@ class EmailStorage:
             (source_type, source_user, folder)
         )
         self.conn.commit()
+
+    def is_pushed(
+        self,
+        message_id: str,
+        dest_type: str,
+        dest_user: str,
+        dest_folder: str,
+    ) -> bool:
+        """Check if a message has been pushed to a destination."""
+        cur = self.conn.execute(
+            """SELECT 1 FROM push_state
+               WHERE message_id = ? AND dest_type = ? AND dest_user = ? AND dest_folder = ?""",
+            (message_id, dest_type, dest_user, dest_folder)
+        )
+        return cur.fetchone() is not None
+
+    def mark_pushed(
+        self,
+        message_id: str,
+        dest_type: str,
+        dest_user: str,
+        dest_folder: str,
+    ) -> None:
+        """Mark a message as pushed to a destination."""
+        self.conn.execute(
+            """INSERT OR IGNORE INTO push_state (message_id, dest_type, dest_user, dest_folder)
+               VALUES (?, ?, ?, ?)""",
+            (message_id, dest_type, dest_user, dest_folder)
+        )
+        self.conn.commit()
+
+    def count_pushed(
+        self,
+        dest_type: str,
+        dest_user: str,
+        dest_folder: str,
+    ) -> int:
+        """Count messages pushed to a destination."""
+        cur = self.conn.execute(
+            """SELECT COUNT(*) FROM push_state
+               WHERE dest_type = ? AND dest_user = ? AND dest_folder = ?""",
+            (dest_type, dest_user, dest_folder)
+        )
+        return cur.fetchone()[0]
+
+    def iter_unpushed(
+        self,
+        dest_type: str,
+        dest_user: str,
+        dest_folder: str,
+    ) -> Iterator[StoredMessage]:
+        """Iterate over messages not yet pushed to a destination."""
+        cur = self.conn.execute(
+            """SELECT m.* FROM messages m
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM push_state p
+                   WHERE p.message_id = m.message_id
+                   AND p.dest_type = ? AND p.dest_user = ? AND p.dest_folder = ?
+               )
+               ORDER BY m.date""",
+            (dest_type, dest_user, dest_folder)
+        )
+        for row in cur:
+            yield self._row_to_message(row)
 
     def _row_to_message(self, row: sqlite3.Row) -> StoredMessage:
         """Convert a database row to StoredMessage."""
