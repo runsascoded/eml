@@ -8,7 +8,7 @@ from pathlib import Path
 
 import humanize
 import yaml
-from click import argument, echo, group, option, style
+from click import argument, echo, group, option, progressbar, style
 from dotenv import load_dotenv
 
 from .imap import EmailInfo, FilterConfig, GmailClient, ZohoClient, IMAPClient
@@ -121,6 +121,7 @@ def folders(host: str, password: str | None, size: bool, user: str | None, folde
 
 
 @main.command()
+@option('-b', '--batch', 'checkpoint_interval', default=100, help="Save progress every N messages (default: 100)")
 @option('-c', '--config', 'config_file', type=str, help="YAML config file")
 @option('-f', '--folder', type=str, help="Source folder (default: [Gmail]/All Mail for gmail)")
 @option('-h', '--host', default="gmail", help="IMAP host (gmail, zoho, or hostname)")
@@ -131,6 +132,7 @@ def folders(host: str, password: str | None, size: bool, user: str | None, folde
 @option('-u', '--user', envvar="GMAIL_USER", help="IMAP username (or GMAIL_USER env)")
 @option('-v', '--verbose', is_flag=True, help="Show each message fetched")
 def pull(
+    checkpoint_interval: int,
     config_file: str | None,
     folder: str | None,
     host: str,
@@ -228,63 +230,71 @@ def pull(
             uids = uids[:limit]
 
         echo(f"Fetching {len(uids)} messages...")
-        echo()
 
         fetched = 0
         skipped = 0
         failed = 0
         max_uid = last_uid or 0
 
-        for uid in uids:
-            uid_int = int(uid)
-            max_uid = max(max_uid, uid_int)
+        def save_checkpoint():
+            """Save sync state checkpoint."""
+            if not dry_run and max_uid > 0:
+                storage.set_sync_state(src_type, src_user, src_folder, uidvalidity, max_uid)
 
-            try:
-                info = client.fetch_info(uid)
-            except Exception as e:
-                failed += 1
-                if verbose:
-                    echo(style(f"✗ UID {uid}: {e}", fg="red"))
-                continue
+        with progressbar(uids, label="Pulling", show_pos=True) as bar:
+            for i, uid in enumerate(bar):
+                uid_int = int(uid)
+                max_uid = max(max_uid, uid_int)
 
-            # Check if already stored
-            if not dry_run and storage.has_message(info.message_id):
-                skipped += 1
-                if verbose:
-                    echo(style(f"· {format_date(info.date)} | {info.subject[:50]} [duplicate]", fg="bright_black"))
-                continue
+                try:
+                    info = client.fetch_info(uid)
+                except Exception as e:
+                    failed += 1
+                    if verbose:
+                        echo(style(f"\n✗ UID {uid}: {e}", fg="red"))
+                    continue
 
-            if dry_run:
-                if verbose:
-                    echo(f"○ {format_date(info.date)} | {info.from_addr[:30]:30} | {info.subject[:40]}")
-                fetched += 1
-                continue
+                # Check if already stored
+                if not dry_run and storage.has_message(info.message_id):
+                    skipped += 1
+                    if verbose:
+                        echo(style(f"\n· {format_date(info.date)} | {info.subject[:50]} [duplicate]", fg="bright_black"))
+                    continue
 
-            # Fetch full message and store
-            try:
-                raw = client.fetch_raw(uid)
-                storage.add_message(
-                    message_id=info.message_id,
-                    raw=raw,
-                    date=info.date,
-                    from_addr=info.from_addr,
-                    to_addr=info.to_addr,
-                    cc_addr=info.cc_addr,
-                    subject=info.subject,
-                    source_folder=src_folder,
-                    source_uid=str(uid_int),
-                )
-                fetched += 1
-                if verbose:
-                    echo(style(f"✓ {format_date(info.date)} | {info.from_addr[:30]:30} | {info.subject[:40]}", fg="green"))
-            except Exception as e:
-                failed += 1
-                if verbose:
-                    echo(style(f"✗ {info.subject[:50]}: {e}", fg="red"))
+                if dry_run:
+                    if verbose:
+                        echo(f"\n○ {format_date(info.date)} | {info.from_addr[:30]:30} | {info.subject[:40]}")
+                    fetched += 1
+                    continue
 
-        # Update sync state
-        if not dry_run and max_uid > 0:
-            storage.set_sync_state(src_type, src_user, src_folder, uidvalidity, max_uid)
+                # Fetch full message and store
+                try:
+                    raw = client.fetch_raw(uid)
+                    storage.add_message(
+                        message_id=info.message_id,
+                        raw=raw,
+                        date=info.date,
+                        from_addr=info.from_addr,
+                        to_addr=info.to_addr,
+                        cc_addr=info.cc_addr,
+                        subject=info.subject,
+                        source_folder=src_folder,
+                        source_uid=str(uid_int),
+                    )
+                    fetched += 1
+                    if verbose:
+                        echo(style(f"\n✓ {format_date(info.date)} | {info.from_addr[:30]:30} | {info.subject[:40]}", fg="green"))
+                except Exception as e:
+                    failed += 1
+                    if verbose:
+                        echo(style(f"\n✗ {info.subject[:50]}: {e}", fg="red"))
+
+                # Save checkpoint periodically
+                if (i + 1) % checkpoint_interval == 0:
+                    save_checkpoint()
+
+        # Final sync state update
+        save_checkpoint()
 
         echo()
         if dry_run:
