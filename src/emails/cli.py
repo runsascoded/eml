@@ -3,7 +3,9 @@
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
 
+import yaml
 from click import command, option, echo, style
 from dotenv import load_dotenv
 
@@ -17,6 +19,12 @@ def err(*args, **kwargs):
 
 def format_date(dt: datetime | None) -> str:
     return dt.strftime("%Y-%m-%d") if dt else "?"
+
+
+def load_config_file(path: str) -> dict:
+    """Load config from YAML file."""
+    with open(path) as f:
+        return yaml.safe_load(f) or {}
 
 
 def progress_handler(info: EmailInfo, status: str) -> None:
@@ -39,9 +47,10 @@ def progress_handler(info: EmailInfo, status: str) -> None:
 
 @command()
 @option('-a', '--address', 'addresses', multiple=True, help="Match To/From/Cc (repeatable)")
+@option('-c', '--config', 'config_file', type=str, help="YAML config file")
 @option('-d', '--from-domain', 'from_domains', multiple=True, help="Match From domain (repeatable)")
 @option('-e', '--end-date', type=str, help="End date (YYYY-MM-DD)")
-@option('-f', '--folder', default="INBOX", help="Destination folder in Zoho")
+@option('-f', '--folder', type=str, help="Destination folder in Zoho")
 @option('-F', '--from-address', 'from_addresses', multiple=True, help="Match From address only (repeatable)")
 @option('-l', '--limit', type=int, help="Max emails to process")
 @option('-n', '--dry-run', is_flag=True, help="List matching emails without migrating")
@@ -49,9 +58,10 @@ def progress_handler(info: EmailInfo, status: str) -> None:
 @option('-v', '--verbose', is_flag=True, help="Show skipped messages too")
 def main(
     addresses: tuple[str, ...],
+    config_file: str | None,
     from_domains: tuple[str, ...],
     end_date: str | None,
-    folder: str,
+    folder: str | None,
     from_addresses: tuple[str, ...],
     limit: int | None,
     dry_run: bool,
@@ -61,20 +71,32 @@ def main(
     """Migrate emails from Gmail to Zoho.
 
     \b
-    Filter options (at least one required):
+    Config file (YAML):
+      emails -c config.yml -n
+
+    \b
+    Example config.yml:
+      filters:
+        addresses:
+          - address1
+          - address2
+        from_domains:
+          - domain1
+          - domain2
+        from_addresses:
+          - address3
+      folder: INBOX
+      start_date: 2018-01-01
+      end_date: 2025-03-01
+
+    \b
+    CLI options override config file values.
+
+    \b
+    Filter options (at least one required, via -c or flags):
       -a, --address       Match To, From, or Cc
       -d, --from-domain   Match From domain only
       -F, --from-address  Match From address only
-
-    \b
-    Example:
-      emails \\
-             -a address1 \\
-             -a address2 \\
-             -d domain1 \\
-             -d domain2 \\
-             -F address3 \\
-             -n
 
     \b
     Requires environment variables (or .env file):
@@ -85,15 +107,35 @@ def main(
     """
     load_dotenv()
 
+    # Load config file if provided
+    cfg: dict = {}
+    if config_file:
+        if not Path(config_file).exists():
+            err(f"Config file not found: {config_file}")
+            sys.exit(1)
+        cfg = load_config_file(config_file)
+
+    # Build filters: CLI args override/extend config file
+    cfg_filters = cfg.get("filters", {})
+    all_addresses = list(cfg_filters.get("addresses", [])) + list(addresses)
+    all_from_domains = list(cfg_filters.get("from_domains", [])) + list(from_domains)
+    all_from_addresses = list(cfg_filters.get("from_addresses", [])) + list(from_addresses)
+
     filters = FilterConfig(
-        addresses=list(addresses),
-        from_domains=list(from_domains),
-        from_addresses=list(from_addresses),
+        addresses=all_addresses,
+        from_domains=all_from_domains,
+        from_addresses=all_from_addresses,
     )
 
     if filters.is_empty():
-        err("Error: At least one filter required (-a, -d, or -F)")
+        err("Error: At least one filter required (-a, -d, -F, or via -c config)")
         sys.exit(1)
+
+    # Other options: CLI overrides config
+    dest_folder = folder or cfg.get("folder", "INBOX")
+    start_date_str = start_date or cfg.get("start_date")
+    end_date_str = end_date or cfg.get("end_date")
+    limit = limit if limit is not None else cfg.get("limit")
 
     gmail_user = os.environ.get("GMAIL_USER")
     gmail_password = os.environ.get("GMAIL_APP_PASSWORD")
@@ -116,8 +158,18 @@ def main(
         err("Set them in .env or export them.")
         sys.exit(1)
 
-    parsed_start = datetime.fromisoformat(start_date) if start_date else None
-    parsed_end = datetime.fromisoformat(end_date) if end_date else None
+    # Parse dates (handle both string and date objects from YAML)
+    def parse_date(val) -> datetime | None:
+        if val is None:
+            return None
+        if isinstance(val, datetime):
+            return val
+        if hasattr(val, 'isoformat'):  # date object
+            return datetime.combine(val, datetime.min.time())
+        return datetime.fromisoformat(str(val))
+
+    parsed_start = parse_date(start_date_str)
+    parsed_end = parse_date(end_date_str)
 
     config = MigrationConfig(
         gmail_user=gmail_user,
@@ -125,7 +177,7 @@ def main(
         zoho_user=zoho_user or "",
         zoho_password=zoho_password or "",
         filters=filters,
-        dest_folder=folder,
+        dest_folder=dest_folder,
         start_date=parsed_start,
         end_date=parsed_end,
         dry_run=dry_run,
@@ -137,12 +189,12 @@ def main(
             progress_handler(info, status)
 
     echo("Filters:")
-    if addresses:
-        echo(f"  To/From/Cc: {', '.join(addresses)}")
-    if from_domains:
-        echo(f"  From domains: {', '.join(from_domains)}")
-    if from_addresses:
-        echo(f"  From addresses: {', '.join(from_addresses)}")
+    if all_addresses:
+        echo(f"  To/From/Cc: {', '.join(all_addresses)}")
+    if all_from_domains:
+        echo(f"  From domains: {', '.join(all_from_domains)}")
+    if all_from_addresses:
+        echo(f"  From addresses: {', '.join(all_from_addresses)}")
     if parsed_start or parsed_end:
         echo(f"  Date range: {format_date(parsed_start)} to {format_date(parsed_end)}")
     if dry_run:
