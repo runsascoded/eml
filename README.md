@@ -1,13 +1,13 @@
-# emails
+# eml
 
 Migrate emails between IMAP mailboxes with flexible filtering.
 
 ## Installation
 
 ```bash
-pip install emails
+pip install eml
 # or
-uv add emails
+uv add eml
 ```
 
 ## Quick Start
@@ -22,35 +22,35 @@ ZOHO_PASSWORD=your-password
 EOF
 
 # List Gmail folders/labels
-emails folders
+eml folders
 
 # Dry run migration with config file
-emails migrate -c config.yml -n
+eml migrate -c config.yml -n
 
 # Migrate with CLI flags
-emails migrate -a team@googlegroups.com -D company.com -n
+eml migrate -a team@googlegroups.com -D company.com -n
 ```
 
 ## Commands
 
-### `emails folders`
+### `eml folders`
 
 List folders/labels for an IMAP account:
 
 ```bash
-emails folders                          # Gmail (uses GMAIL_USER env)
-emails folders -h zoho -u you@zoho.com  # Zoho
-emails folders -h imap.example.com      # Custom IMAP
+eml folders                          # Gmail (uses GMAIL_USER env)
+eml folders -h zoho -u you@zoho.com  # Zoho
+eml folders -h imap.example.com      # Custom IMAP
 ```
 
-### `emails migrate`
+### `eml migrate`
 
 Migrate emails between mailboxes:
 
 ```bash
-emails migrate -c config.yml -n         # Dry run with config
-emails migrate -c config.yml            # Actually migrate
-emails migrate -a addr@example.com -n   # Filter by address
+eml migrate -c config.yml -n         # Dry run with config
+eml migrate -c config.yml            # Actually migrate
+eml migrate -a addr@example.com -n   # Filter by address
 ```
 
 ## Configuration
@@ -105,10 +105,10 @@ Public Readers (pmail webapp, JSON API)
 ```
 
 Planned commands:
-- `emails pull` - Fetch from IMAP to local SQLite/Maildir
-- `emails push` - Send from local storage to destination
-- `emails ls` - Query local storage
-- `emails serve` - Serve web UI for browsing emails (pmail)
+- `eml pull` - Fetch from IMAP to local SQLite/Maildir
+- `eml push` - Send from local storage to destination
+- `eml ls` - Query local storage
+- `eml serve` - Serve web UI for browsing emails (pmail)
 
 ## License
 
