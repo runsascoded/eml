@@ -30,6 +30,7 @@ Source IMAP → pull → .eml/msgs.db → push → Destination IMAP
 | `f` | `folders` |
 | `p` | `pull` |
 | `ps` | `push` |
+| `st` | `stats` |
 | `s` | `serve` |
 
 ## Common Patterns

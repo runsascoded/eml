@@ -99,8 +99,14 @@ eml push zoho                    # push all messages
 eml push zoho -t work            # push only 'work' tagged
 eml push zoho -t work -f Work    # push to specific folder
 eml push zoho -l 10 -v           # push 10, verbose
+eml push zoho -d 2               # 2 second delay (rate limiting)
 eml push zoho -n                 # dry run
 ```
+
+Options:
+- `-d/--delay` - seconds between messages (for rate limiting)
+- `-e/--max-errors` - abort after N consecutive errors (default 10)
+- `-S/--max-size` - skip messages larger than N MB (default 25)
 
 ### `eml ls`
 
@@ -120,6 +126,14 @@ List all tags with counts:
 
 ```bash
 eml tags
+```
+
+### `eml stats` (`st`)
+
+Show aggregate statistics:
+
+```bash
+eml stats                        # size distribution, push status, etc.
 ```
 
 ### `eml serve` (`s`)
