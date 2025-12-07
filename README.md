@@ -13,64 +13,93 @@ uv add eml
 ## Quick Start
 
 ```bash
-# Set source credentials (or use -u/-p flags)
-export SRC_USER=you@gmail.com
-export SRC_PASS=xxxx-xxxx-xxxx-xxxx
+# Initialize project
+eml init
 
-# List folders
-eml folders
+# Add accounts
+eml account add gmail user@gmail.com      # prompts for password
+eml account add zoho user@example.com
 
 # Pull emails to local storage
-eml pull -f "MyLabel"
+eml pull gmail -f "Work" -t work          # tag as 'work'
 
-# Query local storage
-eml ls
+# Push to destination
+eml push zoho -t work -f Work             # push 'work' tagged messages
+```
 
-# Set destination credentials and push
-export DST_USER=you@zoho.com
-export DST_PASS=your-password
-eml push
+## Project Structure
+
+```
+.eml/
+  msgs.db     # messages, sync_state, push_state, tags
+  accts.db    # account credentials (local)
+
+~/.config/eml/
+  accts.db    # account credentials (global fallback)
 ```
 
 ## Commands
 
-### `eml folders [FOLDER]`
+All commands have short aliases shown in parentheses.
 
-List folders/labels, or show info for a specific folder:
+### `eml init` (`i`)
+
+Initialize project directory:
 
 ```bash
-eml folders                              # List all folders
-eml folders "MyLabel"                    # Show message count
-eml folders -s "MyLabel"                 # Show count and total size
-eml folders -h imap.other.com -u user    # Query different account
+eml init                    # create .eml/ in current directory
+eml init -g                 # create ~/.config/eml/ for global accounts
 ```
 
-### `eml pull`
+### `eml account` (`a`)
 
-Pull emails from IMAP to local SQLite storage:
+Manage IMAP accounts:
 
 ```bash
-eml pull -f "Work"                       # Pull from label
-eml pull -h imap.other.com -u user       # Pull from different account
-eml pull -f "Work" -o work.db            # Custom database path
-eml pull -b 50                           # Checkpoint every 50 messages
-eml pull -n                              # Dry run
+eml account add gmail user@gmail.com      # add local account (a a)
+eml account add zoho user@example.com -g  # add global account
+eml account ls                            # list accounts (a l)
+eml account rm gmail                      # remove account (a r)
+```
+
+### `eml folders` (`f`)
+
+List folders/labels:
+
+```bash
+eml folders gmail                # list all folders
+eml folders gmail INBOX          # show message count
+eml folders gmail -s "Work"      # show count and total size
+```
+
+### `eml pull` (`p`)
+
+Pull emails from IMAP to local storage:
+
+```bash
+eml pull gmail                   # pull from All Mail
+eml pull gmail -f "Work"         # pull from label
+eml pull gmail -f "Work" -t work # pull and tag as 'work'
+eml pull gmail -l 100            # limit to 100 messages
+eml pull gmail -n                # dry run
 ```
 
 Features:
 - Progress bar with message count
 - Incremental sync (only fetches new messages)
 - Checkpoint saves every N messages (crash-safe)
+- Optional tagging with `-t`
 
-### `eml push`
+### `eml push` (`ps`)
 
 Push emails from local storage to IMAP destination:
 
 ```bash
-eml push                                 # Push to destination
-eml push -h imap.other.com -u user       # Push to different account
-eml push -f "Archive"                    # Push to specific folder
-eml push -n                              # Dry run
+eml push zoho                    # push all messages
+eml push zoho -t work            # push only 'work' tagged
+eml push zoho -t work -f Work    # push to specific folder
+eml push zoho -l 10 -v           # push 10, verbose
+eml push zoho -n                 # dry run
 ```
 
 ### `eml ls`
@@ -78,54 +107,65 @@ eml push -n                              # Dry run
 Query local storage:
 
 ```bash
-eml ls                                   # List recent messages
-eml ls -l 50                             # Show 50 messages
-eml ls -f "john@"                        # Filter by From
-eml ls -s "invoice"                      # Filter by subject
-eml ls "search term"                     # Search From/Subject
+eml ls                           # list recent messages
+eml ls -t work                   # list 'work' tagged
+eml ls -l 50                     # show 50 messages
+eml ls -f "john@"                # filter by From
+eml ls "search term"             # search From/Subject
+```
+
+### `eml tags`
+
+List all tags with counts:
+
+```bash
+eml tags
+```
+
+### `eml serve` (`s`)
+
+Start pmail web UI:
+
+```bash
+eml serve                        # http://127.0.0.1:5000
+eml serve -p 8080                # different port
 ```
 
 ### `eml migrate`
 
-Direct IMAP-to-IMAP migration (without local storage):
+Direct IMAP-to-IMAP migration (legacy, without local storage):
 
 ```bash
-eml migrate -c migrate.yml -n            # Dry run with config
-eml migrate -a addr@example.com -n       # Filter by address
+eml migrate -c migrate.yml -n    # dry run with config
 ```
 
-## Environment Variables
+## Account Lookup
 
-Credentials can be set via environment or `-u`/`-p` flags:
+Accounts are looked up in order:
+1. Local `.eml/accts.db`
+2. Global `~/.config/eml/accts.db`
 
-| Variable | Used by | Description |
-|----------|---------|-------------|
-| `SRC_USER` | `folders`, `pull` | Source IMAP username |
-| `SRC_PASS` | `folders`, `pull` | Source IMAP password |
-| `DST_USER` | `push` | Destination IMAP username |
-| `DST_PASS` | `push` | Destination IMAP password |
+This allows project-specific credentials with global fallback.
 
 ## Architecture
 
 ```
 Source IMAP
-    ↓ pull
-Local Storage (SQLite)
-    ↓ push
+    ↓ pull (with optional tag)
+Local Storage (.eml/msgs.db)
+    ↓ push (filter by tag)
 Destination IMAP
 ```
 
 ## Features
 
+- **Project-based**: `.eml/` directory like `.git/`
+- **Account management**: Local and global credential storage
 - **Incremental sync**: Tracks UIDVALIDITY and last UID per folder
+- **Tagging**: Organize pulled messages, filter on push
 - **Checkpointing**: Saves progress periodically, crash-safe
 - **Deduplication**: By Message-ID across sources
 - **Preserves**: Original dates, threading, attachments
-- **Progress bar**: Visual feedback for long operations
-
-## Planned
-
-- `eml serve` - Web UI for browsing emails (pmail)
 
 ## License
 
