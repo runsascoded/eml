@@ -4,6 +4,7 @@ import imaplib
 import os
 import re
 import sys
+import time
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -11,8 +12,10 @@ from pathlib import Path
 import click
 import humanize
 import yaml
-from click import argument, echo, option, progressbar, prompt, style
+from click import argument, echo, option, prompt, style
 from dotenv import load_dotenv
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TaskProgressColumn, TimeElapsedColumn, TimeRemainingColumn
 
 from .imap import EmailInfo, FilterConfig, GmailClient, ZohoClient, IMAPClient
 from .migrate import EmailMigrator, MigrationConfig
@@ -116,6 +119,7 @@ class AliasGroup(click.Group):
     'i': 'init',
     'p': 'pull',
     'ps': 'push',
+    'st': 'stats',
     's': 'serve',
 })
 def main():
@@ -471,18 +475,47 @@ def pull(
             uids = uids[:limit]
 
         echo(f"Fetching {len(uids)} messages...")
+        echo()
 
         fetched = 0
         skipped = 0
         failed = 0
         max_uid = last_uid or 0
+        total = len(uids)
+        console = Console()
 
         def save_checkpoint():
             if not dry_run and max_uid > 0:
                 storage.set_sync_state(src_type, src_user, src_folder, uidvalidity, max_uid)
 
-        with progressbar(uids, label="Pulling", show_pos=True) as bar:
-            for i, uid in enumerate(bar):
+        def print_result(status: str, subj: str, detail: str | None = None):
+            """Print a result line (scrollable) above the progress bar."""
+            if status == "ok":
+                console.print(f"  [green]✓[/] {subj}")
+            elif status == "dry":
+                console.print(f"  [dim]○ {subj}[/]")
+            elif status == "skip":
+                console.print(f"  [dim]· {subj}[/]")
+            else:
+                msg = f"  [red]✗[/] {subj}"
+                if verbose and detail:
+                    msg += f" [dim red]: {detail[:60]}[/]"
+                console.print(msg)
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]Pulling"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+            TextColumn("ETA"),
+            TimeRemainingColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("pull", total=total)
+
+            for i, uid in enumerate(uids):
                 uid_int = int(uid)
                 max_uid = max(max_uid, uid_int)
 
@@ -491,20 +524,25 @@ def pull(
                 except Exception as e:
                     failed += 1
                     if verbose:
-                        echo(style(f"\n✗ UID {uid}: {e}", fg="red"))
+                        print_result("fail", f"UID {uid}", str(e))
+                    progress.advance(task)
                     continue
+
+                subj = (info.subject or "(no subject)")[:60]
 
                 # Check if already stored
                 if not dry_run and storage.has_message(info.message_id):
                     skipped += 1
                     if verbose:
-                        echo(style(f"\n· {format_date(info.date)} | {info.subject[:50]} [duplicate]", fg="bright_black"))
+                        print_result("skip", subj)
+                    progress.advance(task)
                     continue
 
                 if dry_run:
                     if verbose:
-                        echo(f"\n○ {format_date(info.date)} | {info.from_addr[:30]:30} | {info.subject[:40]}")
+                        print_result("dry", subj)
                     fetched += 1
+                    progress.advance(task)
                     continue
 
                 # Fetch full message and store
@@ -524,11 +562,13 @@ def pull(
                     )
                     fetched += 1
                     if verbose:
-                        echo(style(f"\n✓ {format_date(info.date)} | {info.from_addr[:30]:30} | {info.subject[:40]}", fg="green"))
+                        print_result("ok", subj)
                 except Exception as e:
                     failed += 1
                     if verbose:
-                        echo(style(f"\n✗ {info.subject[:50]}: {e}", fg="red"))
+                        print_result("fail", subj, str(e))
+
+                progress.advance(task)
 
                 # Save checkpoint periodically
                 if (i + 1) % checkpoint_interval == 0:
@@ -542,10 +582,11 @@ def pull(
             echo(f"Would fetch: {fetched}")
         else:
             echo(f"Fetched: {fetched}")
-            echo(f"Skipped (duplicate): {skipped}")
+            if skipped:
+                echo(f"Skipped (duplicate): {skipped}")
             echo(f"Total in storage: {storage.count():,}")
         if failed:
-            echo(f"Failed: {failed}")
+            echo(style(f"Failed: {failed}", fg="red"))
 
         if not dry_run:
             storage.disconnect()
@@ -564,19 +605,25 @@ def pull(
 @main.command()
 @require_init
 @option('-b', '--batch', 'checkpoint_interval', default=100, help="Mark progress every N messages")
+@option('-d', '--delay', type=float, default=0, help="Delay between messages (seconds)")
+@option('-e', '--max-errors', default=10, help="Abort after N consecutive errors")
 @option('-f', '--folder', default="INBOX", help="Destination folder")
 @option('-l', '--limit', type=int, help="Max emails to push")
 @option('-n', '--dry-run', is_flag=True, help="Show what would be pushed")
 @option('-p', '--password', help="IMAP password (overrides account)")
+@option('-S', '--max-size', type=int, default=25, help="Skip messages larger than N MB")
 @tag_option
 @option('-u', '--user', help="IMAP username (overrides account)")
 @option('-v', '--verbose', is_flag=True, help="Show each message")
 @argument('account')
 def push(
     checkpoint_interval: int,
+    delay: float,
+    max_errors: int,
     folder: str,
     limit: int | None,
     dry_run: bool,
+    max_size: int,
     password: str | None,
     tag: str | None,
     user: str | None,
@@ -612,6 +659,7 @@ def push(
         echo(style("DRY RUN - no changes will be made", fg="yellow"))
     echo()
 
+    client = None
     try:
         # Open storage
         msgs_path = get_msgs_db_path()
@@ -643,42 +691,118 @@ def push(
 
         pushed = 0
         failed = 0
+        skipped = 0
+        consecutive_errors = 0
+        aborted = False
+        errors = []  # collect errors for reporting
+        total = len(unpushed)
+        max_size_bytes = max_size * 1024 * 1024
+        console = Console()
 
-        with progressbar(unpushed, label="Pushing", show_pos=True) as bar:
-            for i, msg in enumerate(bar):
-                if dry_run:
+        def print_result(status: str, subj: str, detail: str | None = None):
+            """Print a result line (scrollable) above the progress bar."""
+            if status == "ok":
+                console.print(f"  [green]✓[/] {subj}")
+            elif status == "dry":
+                console.print(f"  [dim]○ {subj}[/]")
+            elif status == "skip":
+                msg = f"  [yellow]⊘[/] {subj}"
+                if detail:
+                    msg += f" [dim yellow]({detail})[/]"
+                console.print(msg)
+            else:
+                msg = f"  [red]✗[/] {subj}"
+                if verbose and detail:
+                    msg += f" [dim red]: {detail[:60]}[/]"
+                console.print(msg)
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]Pushing"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+            TextColumn("ETA"),
+            TimeRemainingColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("push", total=total)
+
+            for msg in unpushed:
+                subj = (msg.subject or "(no subject)")[:60]
+                msg_size = len(msg.raw)
+
+                # Skip oversized messages
+                if msg_size > max_size_bytes:
+                    size_mb = msg_size / 1024 / 1024
+                    skipped += 1
                     if verbose:
-                        echo(f"\n○ {format_date(msg.date)} | {msg.from_addr[:30]:30} | {msg.subject[:40]}")
-                    pushed += 1
+                        print_result("skip", subj, f"{size_mb:.1f}MB > {max_size}MB")
+                    progress.advance(task)
                     continue
 
-                try:
-                    success = client.conn.append(
-                        dst_folder,
-                        None,
-                        imaplib.Time2Internaldate(msg.date.timestamp()) if msg.date else None,
-                        msg.raw,
-                    )
-                    if success[0] == "OK":
-                        storage.mark_pushed(msg.message_id, dst_type, dst_user, dst_folder)
-                        pushed += 1
-                        if verbose:
-                            echo(style(f"\n✓ {format_date(msg.date)} | {msg.from_addr[:30]:30} | {msg.subject[:40]}", fg="green"))
-                    else:
-                        failed += 1
-                        if verbose:
-                            echo(style(f"\n✗ {msg.subject[:50]}: {success}", fg="red"))
-                except Exception as e:
-                    failed += 1
+                if dry_run:
                     if verbose:
-                        echo(style(f"\n✗ {msg.subject[:50]}: {e}", fg="red"))
+                        print_result("dry", subj)
+                    pushed += 1
+                else:
+                    try:
+                        success = client.conn.append(
+                            dst_folder,
+                            None,
+                            imaplib.Time2Internaldate(msg.date.timestamp()) if msg.date else None,
+                            msg.raw,
+                        )
+                        if success[0] == "OK":
+                            storage.mark_pushed(msg.message_id, dst_type, dst_user, dst_folder)
+                            pushed += 1
+                            consecutive_errors = 0  # reset on success
+                            if verbose:
+                                print_result("ok", subj)
+                        else:
+                            failed += 1
+                            consecutive_errors += 1
+                            err_msg = f"IMAP returned: {success}"
+                            errors.append((msg, err_msg))
+                            if verbose:
+                                print_result("fail", subj, err_msg)
+                    except Exception as e:
+                        failed += 1
+                        consecutive_errors += 1
+                        errors.append((msg, str(e)))
+                        if verbose:
+                            print_result("fail", subj, str(e))
 
+                progress.advance(task)
+
+                # Delay between requests (for rate limiting)
+                if delay > 0 and not dry_run:
+                    time.sleep(delay)
+
+                # Abort after too many consecutive errors
+                if consecutive_errors >= max_errors:
+                    console.print(f"\n[bold red]Aborting: {consecutive_errors} consecutive errors (likely rate limited)[/]")
+                    aborted = True
+                    break
+
+        # Final summary
         echo()
         if dry_run:
             echo(f"Would push: {pushed}")
+            if skipped:
+                echo(style(f"Would skip: {skipped} (over {max_size}MB)", fg="yellow"))
         else:
             echo(f"Pushed: {pushed}")
-            echo(f"Failed: {failed}")
+            if skipped:
+                echo(style(f"Skipped: {skipped} (over {max_size}MB)", fg="yellow"))
+            if failed:
+                echo(style(f"Failed: {failed}", fg="red"))
+                if not verbose and errors:
+                    echo("\nErrors:")
+                    for msg, error in errors[:5]:
+                        subj = (msg.subject or "(no subject)")[:40]
+                        echo(f"  {subj}: {error}")
 
         storage.disconnect()
 
@@ -686,7 +810,7 @@ def push(
         err(f"Error: {e}")
         sys.exit(1)
     finally:
-        if not dry_run and client._conn:
+        if client and client._conn:
             client.disconnect()
 
 
@@ -805,6 +929,138 @@ def tags():
         echo("Tags:\n")
         for tag, count in tag_counts:
             echo(f"  {tag:20} {count:,} messages")
+
+        storage.disconnect()
+
+    except FileNotFoundError as e:
+        err(str(e))
+        sys.exit(1)
+
+
+# ============================================================================
+# stats
+# ============================================================================
+
+@main.command()
+@require_init
+def stats():
+    """Show aggregate statistics about stored messages.
+
+    \b
+    Examples:
+      eml stats
+    """
+    from rich.table import Table
+
+    try:
+        msgs_path = get_msgs_db_path()
+        storage = MessageStorage(msgs_path)
+        storage.connect()
+        console = Console()
+
+        # Basic counts
+        total = storage.count()
+        if total == 0:
+            echo("No messages in storage.")
+            return
+
+        # Run aggregate queries
+        cursor = storage.conn.execute("""
+            SELECT
+                COUNT(*) as count,
+                SUM(length(raw)) as total_bytes,
+                MIN(date) as oldest,
+                MAX(date) as newest,
+                AVG(length(raw)) as avg_size
+            FROM messages
+        """)
+        row = cursor.fetchone()
+        total_bytes = row["total_bytes"] or 0
+        oldest = row["oldest"]
+        newest = row["newest"]
+        avg_size = row["avg_size"] or 0
+
+        # Size distribution
+        size_dist = storage.conn.execute("""
+            SELECT
+                CASE
+                    WHEN length(raw) > 30*1024*1024 THEN '>30MB'
+                    WHEN length(raw) > 25*1024*1024 THEN '25-30MB'
+                    WHEN length(raw) > 20*1024*1024 THEN '20-25MB'
+                    WHEN length(raw) > 15*1024*1024 THEN '15-20MB'
+                    WHEN length(raw) > 10*1024*1024 THEN '10-15MB'
+                    WHEN length(raw) > 5*1024*1024 THEN '5-10MB'
+                    WHEN length(raw) > 1*1024*1024 THEN '1-5MB'
+                    WHEN length(raw) > 100*1024 THEN '100KB-1MB'
+                    ELSE '<100KB'
+                END as size_range,
+                COUNT(*) as count,
+                SUM(length(raw)) as total_bytes
+            FROM messages
+            GROUP BY 1
+            ORDER BY MAX(length(raw)) DESC
+        """).fetchall()
+
+        # Tag counts
+        tag_counts = storage.list_tags()
+
+        # Push state (get unique destinations)
+        push_stats = storage.conn.execute("""
+            SELECT dest_type, dest_user, dest_folder, COUNT(*) as count
+            FROM push_state
+            GROUP BY dest_type, dest_user, dest_folder
+        """).fetchall()
+
+        # Display
+        console.print()
+        console.print(f"[bold]Messages:[/] {total:,}")
+        console.print(f"[bold]Total size:[/] {humanize.naturalsize(total_bytes)}")
+        console.print(f"[bold]Avg size:[/] {humanize.naturalsize(avg_size)}")
+        if oldest:
+            console.print(f"[bold]Date range:[/] {oldest[:10]} → {newest[:10]}")
+        console.print()
+
+        # Size distribution table
+        table = Table(title="Size Distribution")
+        table.add_column("Size", style="cyan")
+        table.add_column("Count", justify="right")
+        table.add_column("Total", justify="right")
+        table.add_column("%", justify="right")
+
+        for row in size_dist:
+            pct = (row["count"] / total) * 100
+            table.add_row(
+                row["size_range"],
+                f"{row['count']:,}",
+                humanize.naturalsize(row["total_bytes"]),
+                f"{pct:.1f}%",
+            )
+        console.print(table)
+
+        # Tags
+        if tag_counts:
+            console.print()
+            tag_table = Table(title="Tags")
+            tag_table.add_column("Tag", style="cyan")
+            tag_table.add_column("Count", justify="right")
+            for tag, count in tag_counts:
+                tag_table.add_row(tag, f"{count:,}")
+            console.print(tag_table)
+
+        # Push destinations
+        if push_stats:
+            console.print()
+            push_table = Table(title="Pushed To")
+            push_table.add_column("Destination", style="cyan")
+            push_table.add_column("Folder")
+            push_table.add_column("Count", justify="right")
+            for row in push_stats:
+                push_table.add_row(
+                    f"{row['dest_type']} ({row['dest_user']})",
+                    row["dest_folder"],
+                    f"{row['count']:,}",
+                )
+            console.print(push_table)
 
         storage.disconnect()
 

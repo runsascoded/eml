@@ -92,8 +92,9 @@ class BaseStorage:
     def connect(self) -> None:
         """Open database connection and create schema if needed."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path)
+        self._conn = sqlite3.connect(self.path, timeout=30.0)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")  # better concurrency
         self._create_schema()
 
     def disconnect(self) -> None:
