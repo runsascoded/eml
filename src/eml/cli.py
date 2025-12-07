@@ -5,16 +5,22 @@ import os
 import re
 import sys
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 
+import click
 import humanize
 import yaml
-from click import argument, echo, group, option, progressbar, style
+from click import argument, echo, option, progressbar, prompt, style
 from dotenv import load_dotenv
 
 from .imap import EmailInfo, FilterConfig, GmailClient, ZohoClient, IMAPClient
 from .migrate import EmailMigrator, MigrationConfig
-from .storage import EmailStorage
+from .storage import (
+    Account, AccountStorage, MessageStorage,
+    EML_DIR, MSGS_DB, ACCTS_DB, GLOBAL_CONFIG_DIR,
+    find_eml_dir, get_eml_dir, get_msgs_db_path, get_account,
+)
 
 
 def err(*args, **kwargs):
@@ -41,6 +47,31 @@ def get_imap_client(host: str) -> IMAPClient:
         return IMAPClient(host)
 
 
+def get_password(password_opt: str | None) -> str:
+    """Get password from option, stdin (if piped), or prompt."""
+    if password_opt:
+        return password_opt
+    elif not sys.stdin.isatty():
+        return sys.stdin.readline().rstrip("\n")
+    else:
+        return prompt("Password", hide_input=True)
+
+
+def require_init(f):
+    """Decorator that requires .eml directory to exist."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not find_eml_dir():
+            err("Not in an eml project. Run 'eml init' first.")
+            sys.exit(1)
+        return f(*args, **kwargs)
+    return wrapper
+
+
+# Shared options
+tag_option = option('-t', '--tag', help="Tag for organizing messages")
+
+
 def progress_handler(info: EmailInfo, status: str) -> None:
     """Print progress for each email processed."""
     date_str = format_date(info.date)
@@ -59,44 +90,272 @@ def progress_handler(info: EmailInfo, status: str) -> None:
     echo(f"{icon} {date_str} | {from_short:30} | {subj_short}")
 
 
-@group()
+class AliasGroup(click.Group):
+    """Click Group that supports command aliases."""
+
+    def __init__(self, *args, aliases: dict[str, str] | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.aliases = aliases or {}
+
+    def get_command(self, ctx, cmd_name):
+        # Check for alias
+        cmd_name = self.aliases.get(cmd_name, cmd_name)
+        return super().get_command(ctx, cmd_name)
+
+    def resolve_command(self, ctx, args):
+        # Resolve alias before dispatching
+        _, cmd_name, args = super().resolve_command(ctx, args)
+        cmd_name = self.aliases.get(cmd_name, cmd_name)
+        return _, cmd_name, args
+
+
+# Main group with aliases
+@click.group(cls=AliasGroup, aliases={
+    'a': 'account',
+    'f': 'folders',
+    'i': 'init',
+    'p': 'pull',
+    'ps': 'push',
+    's': 'serve',
+})
 def main():
     """Email migration tools."""
     load_dotenv()
 
 
+# ============================================================================
+# init
+# ============================================================================
+
 @main.command()
-@option('-h', '--host', default="gmail", help="IMAP host (gmail, zoho, or hostname)")
-@option('-p', '--password', envvar="SRC_PASS", help="IMAP password (or SRC_PASS env)")
+@option('-g', '--global', 'use_global', is_flag=True, help="Initialize global config (~/.config/eml)")
+def init(use_global: bool):
+    """Initialize eml project directory.
+
+    \b
+    Examples:
+      eml init              # Create .eml/ in current directory
+      eml init -g           # Create ~/.config/eml/ for global accounts
+    """
+    if use_global:
+        target = GLOBAL_CONFIG_DIR
+        target.mkdir(parents=True, exist_ok=True)
+        accts_path = target / ACCTS_DB
+        with AccountStorage(accts_path) as storage:
+            pass  # Just create schema
+        echo(f"Initialized global config: {target}")
+    else:
+        eml_dir = Path.cwd() / EML_DIR
+        if eml_dir.exists():
+            echo(f"Already initialized: {eml_dir}")
+            return
+        eml_dir.mkdir(parents=True)
+        # Create empty databases with schema
+        with MessageStorage(eml_dir / MSGS_DB) as storage:
+            pass
+        with AccountStorage(eml_dir / ACCTS_DB) as storage:
+            pass
+        echo(f"Initialized: {eml_dir}")
+        echo(f"  {MSGS_DB}   - message storage")
+        echo(f"  {ACCTS_DB}  - account credentials")
+        echo()
+        echo("Next steps:")
+        echo("  eml account add gmail user@gmail.com")
+        echo("  eml pull gmail -f INBOX")
+
+
+# ============================================================================
+# account (with aliases)
+# ============================================================================
+
+@main.group(cls=AliasGroup, aliases={
+    'a': 'add',
+    'l': 'ls',
+    'r': 'rm',
+})
+def account():
+    """Manage IMAP accounts."""
+    pass
+
+
+@account.command("add")
+@option('-g', '--global', 'use_global', is_flag=True, help="Add to global config")
+@option('-p', '--password', 'password_opt', help="Password (prompts if not provided)")
+@option('-t', '--type', 'acct_type', help="Account type (gmail, zoho, or hostname)")
+@argument('name')
+@argument('user')
+def account_add(use_global: bool, password_opt: str | None, acct_type: str | None, name: str, user: str):
+    """Add or update an account.
+
+    \b
+    Examples:
+      eml account add gmail user@gmail.com
+      eml a a gmail user@gmail.com              # using aliases
+      echo "$PASS" | eml account add zoho user@example.com
+      eml account add gmail user@gmail.com -g   # global account
+    """
+    password = get_password(password_opt)
+
+    # Infer type from name if not specified
+    if not acct_type:
+        if "gmail" in name.lower():
+            acct_type = "gmail"
+        elif "zoho" in name.lower():
+            acct_type = "zoho"
+        else:
+            err(f"Cannot infer account type from '{name}'. Use -t to specify.")
+            sys.exit(1)
+
+    # Determine where to store
+    if use_global:
+        accts_path = GLOBAL_CONFIG_DIR / ACCTS_DB
+        GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        location = "global"
+    else:
+        eml_dir = find_eml_dir()
+        if not eml_dir:
+            err("Not in an eml project. Run 'eml init' first, or use -g for global.")
+            sys.exit(1)
+        accts_path = eml_dir / ACCTS_DB
+        location = "local"
+
+    with AccountStorage(accts_path) as storage:
+        storage.add(name, acct_type, user, password)
+
+    echo(f"Account '{name}' saved ({acct_type}: {user}) [{location}]")
+
+
+@account.command("ls")
+@option('-a', '--all', 'show_all', is_flag=True, help="Show both local and global accounts")
+@option('-g', '--global', 'use_global', is_flag=True, help="Show global accounts only")
+def account_ls(show_all: bool, use_global: bool):
+    """List accounts.
+
+    \b
+    Examples:
+      eml account ls        # local accounts (with global fallback info)
+      eml a l               # using aliases
+      eml account ls -g     # global accounts only
+      eml account ls -a     # both local and global
+    """
+    eml_dir = find_eml_dir()
+    local_accts_path = eml_dir / ACCTS_DB if eml_dir else None
+    global_accts_path = GLOBAL_CONFIG_DIR / ACCTS_DB
+
+    accounts_found = False
+
+    # Local accounts
+    if not use_global and local_accts_path and local_accts_path.exists():
+        with AccountStorage(local_accts_path) as storage:
+            accounts = storage.list()
+        if accounts:
+            accounts_found = True
+            echo(f"Local accounts ({local_accts_path}):\n")
+            for acct in accounts:
+                echo(f"  {acct.name:15} {acct.type:10} {acct.user}")
+            echo()
+
+    # Global accounts
+    if (use_global or show_all or not accounts_found) and global_accts_path.exists():
+        with AccountStorage(global_accts_path) as storage:
+            accounts = storage.list()
+        if accounts:
+            accounts_found = True
+            echo(f"Global accounts ({global_accts_path}):\n")
+            for acct in accounts:
+                echo(f"  {acct.name:15} {acct.type:10} {acct.user}")
+            echo()
+
+    if not accounts_found:
+        echo("No accounts configured.")
+        echo("  eml account add gmail user@gmail.com")
+
+
+@account.command("rm")
+@option('-g', '--global', 'use_global', is_flag=True, help="Remove from global config")
+@argument('name')
+def account_rm(use_global: bool, name: str):
+    """Remove an account.
+
+    \b
+    Examples:
+      eml account rm gmail
+      eml a r gmail           # using aliases
+    """
+    if use_global:
+        accts_path = GLOBAL_CONFIG_DIR / ACCTS_DB
+    else:
+        eml_dir = find_eml_dir()
+        if not eml_dir:
+            err("Not in an eml project. Run 'eml init' first, or use -g for global.")
+            sys.exit(1)
+        accts_path = eml_dir / ACCTS_DB
+
+    if not accts_path.exists():
+        err(f"No accounts database: {accts_path}")
+        sys.exit(1)
+
+    with AccountStorage(accts_path) as storage:
+        removed = storage.remove(name)
+
+    if removed:
+        echo(f"Account '{name}' removed.")
+    else:
+        err(f"Account '{name}' not found.")
+        sys.exit(1)
+
+
+# ============================================================================
+# folders
+# ============================================================================
+
+@main.command()
+@option('-p', '--password', help="IMAP password")
 @option('-s', '--size', is_flag=True, help="Show total size of messages")
-@option('-u', '--user', envvar="SRC_USER", help="IMAP username (or SRC_USER env)")
+@option('-u', '--user', help="IMAP username")
+@argument('account_or_folder', required=False)
 @argument('folder', required=False)
-def folders(host: str, password: str | None, size: bool, user: str | None, folder: str | None):
+def folders(password: str | None, size: bool, user: str | None, account_or_folder: str | None, folder: str | None):
     """List folders/labels, or show count for a specific folder.
 
     \b
     Examples:
-      eml folders                        # List all folders
-      eml folders INBOX                  # Show count for INBOX
-      eml folders -s "Work"              # Show count and size
-      eml folders -h zoho -u you@example.com
+      eml folders gmail                  # List all folders for gmail account
+      eml folders gmail INBOX            # Show count for INBOX
+      eml folders gmail -s "Work"        # Show count and size
     """
-    if not user or not password:
-        err("Missing credentials. Set SRC_USER/SRC_PASS env or use -u/-p flags.")
+    # Parse arguments
+    acct = None
+    if account_or_folder:
+        acct = get_account(account_or_folder)
+        if not acct:
+            # Maybe it's a folder name with explicit creds?
+            if user and password:
+                folder = account_or_folder
+            else:
+                err(f"Account '{account_or_folder}' not found.")
+                err("  eml account add gmail user@gmail.com")
+                sys.exit(1)
+
+    if acct:
+        src_type = acct.type
+        src_user = user or acct.user
+        src_password = password or acct.password
+    else:
+        src_type = "gmail"
+        src_user = user or os.environ.get("SRC_USER")
+        src_password = password or os.environ.get("SRC_PASS")
+
+    if not src_user or not src_password:
+        err("Missing credentials. Use an account name or -u/-p flags.")
         sys.exit(1)
 
-    if host == "gmail":
-        client = GmailClient()
-    elif host == "zoho":
-        client = ZohoClient()
-    else:
-        client = IMAPClient(host)
+    client = get_imap_client(src_type)
 
     try:
-        client.connect(user, password)
+        client.connect(src_user, src_password)
 
         if folder:
-            # Show count for specific folder
             msg_count, _ = client.select_folder(folder, readonly=True)
             if size:
                 total_size = client.get_folder_size()
@@ -104,9 +363,8 @@ def folders(host: str, password: str | None, size: bool, user: str | None, folde
             else:
                 echo(f"{folder}: {msg_count:,} messages")
         else:
-            # List all folders
             folders_list = client.list_folders()
-            echo(f"Folders for {user}:\n")
+            echo(f"Folders for {src_user}:\n")
             for flags, delim, name, count in sorted(folders_list, key=lambda x: x[2]):
                 count_str = f"({count:,})" if count is not None else ""
                 special = ""
@@ -121,79 +379,60 @@ def folders(host: str, password: str | None, size: bool, user: str | None, folde
         client.disconnect()
 
 
+# ============================================================================
+# pull
+# ============================================================================
+
 @main.command()
-@option('-b', '--batch', 'checkpoint_interval', default=100, help="Save progress every N messages (default: 100)")
-@option('-c', '--config', 'config_file', type=str, help="YAML config file")
-@option('-f', '--folder', type=str, help="Source folder (default: [Gmail]/All Mail for gmail)")
-@option('-h', '--host', default="gmail", help="IMAP host (gmail, zoho, or hostname)")
+@require_init
+@option('-b', '--batch', 'checkpoint_interval', default=100, help="Save progress every N messages")
+@option('-f', '--folder', type=str, help="Source folder")
 @option('-l', '--limit', type=int, help="Max emails to fetch")
-@option('-n', '--dry-run', is_flag=True, help="Show what would be fetched without storing")
-@option('-o', '--output', 'db_path', default="emails.db", help="SQLite database path (default: emails.db)")
-@option('-p', '--password', envvar="SRC_PASS", help="IMAP password (or SRC_PASS env)")
-@option('-u', '--user', envvar="SRC_USER", help="IMAP username (or SRC_USER env)")
-@option('-v', '--verbose', is_flag=True, help="Show each message fetched")
+@option('-n', '--dry-run', is_flag=True, help="Show what would be fetched")
+@option('-p', '--password', help="IMAP password (overrides account)")
+@tag_option
+@option('-u', '--user', help="IMAP username (overrides account)")
+@option('-v', '--verbose', is_flag=True, help="Show each message")
+@argument('account')
 def pull(
     checkpoint_interval: int,
-    config_file: str | None,
     folder: str | None,
-    host: str,
     limit: int | None,
     dry_run: bool,
-    db_path: str,
     password: str | None,
+    tag: str | None,
     user: str | None,
     verbose: bool,
+    account: str,
 ):
-    """Pull emails from IMAP to local SQLite storage.
+    """Pull emails from IMAP to local storage.
 
     \b
     Examples:
-      eml pull                              # Pull from Gmail All Mail
-      eml pull -f "Work" -o work.db         # Pull specific label
-      eml pull -c pull.yml                  # Use config file
-      eml pull -n                           # Dry run
-
-    \b
-    Config file (pull.yml):
-      src:
-        type: gmail
-        folder: "Work"
-      storage: emails.db
+      eml pull gmail                      # Pull from Gmail All Mail
+      eml pull gmail -f "Work" -t work    # Pull Work label, tag as 'work'
+      eml p gmail -f INBOX -l 100         # Pull first 100 from INBOX
+      eml pull gmail -n                   # Dry run
     """
-    # Load config file if provided
-    cfg: dict = {}
-    if config_file:
-        if not Path(config_file).exists():
-            err(f"Config file not found: {config_file}")
-            sys.exit(1)
-        cfg = load_config_file(config_file)
-
-    # Resolve source config (CLI overrides config file)
-    src_cfg = cfg.get("src", {})
-    src_type = src_cfg.get("type", host)
-    src_user = user or src_cfg.get("user") or os.environ.get("SRC_USER")
-    src_password = password or src_cfg.get("password") or os.environ.get("SRC_PASS")
-    src_folder = folder or src_cfg.get("folder")
-    db_path = db_path if db_path != "emails.db" else cfg.get("storage", db_path)
-
-    if not src_user or not src_password:
-        err("Missing credentials. Set SRC_USER/SRC_PASS env or use -u/-p flags.")
+    # Look up account
+    acct = get_account(account)
+    if not acct:
+        err(f"Account '{account}' not found.")
+        err("  eml account add gmail user@gmail.com")
         sys.exit(1)
 
+    src_type = acct.type
+    src_user = user or acct.user
+    src_password = password or acct.password
+
     # Create IMAP client
-    if src_type == "gmail" or "gmail" in src_type.lower():
-        client = GmailClient()
-        src_folder = src_folder or client.all_mail_folder
-    elif src_type == "zoho" or "zoho" in src_type.lower():
-        client = ZohoClient()
-        src_folder = src_folder or "INBOX"
-    else:
-        client = IMAPClient(src_type)
-        src_folder = src_folder or "INBOX"
+    client = get_imap_client(src_type)
+    src_folder = folder or (client.all_mail_folder if hasattr(client, 'all_mail_folder') else "INBOX")
 
     echo(f"Source: {src_type} ({src_user})")
     echo(f"Folder: {src_folder}")
-    echo(f"Storage: {db_path}")
+    if tag:
+        echo(f"Tag: {tag}")
     if dry_run:
         echo(style("DRY RUN - no changes will be made", fg="yellow"))
     echo()
@@ -204,7 +443,8 @@ def pull(
         echo(f"Folder has {count:,} messages (UIDVALIDITY: {uidvalidity})")
 
         # Open storage
-        storage = EmailStorage(db_path)
+        msgs_path = get_msgs_db_path()
+        storage = MessageStorage(msgs_path)
         if not dry_run:
             storage.connect()
 
@@ -238,7 +478,6 @@ def pull(
         max_uid = last_uid or 0
 
         def save_checkpoint():
-            """Save sync state checkpoint."""
             if not dry_run and max_uid > 0:
                 storage.set_sync_state(src_type, src_user, src_folder, uidvalidity, max_uid)
 
@@ -281,6 +520,7 @@ def pull(
                         subject=info.subject,
                         source_folder=src_folder,
                         source_uid=str(uid_int),
+                        tags=[tag] if tag else None,
                     )
                     fetched += 1
                     if verbose:
@@ -317,96 +557,74 @@ def pull(
         client.disconnect()
 
 
+# ============================================================================
+# push
+# ============================================================================
+
 @main.command()
-@option('-b', '--batch', 'checkpoint_interval', default=100, help="Mark progress every N messages (default: 100)")
-@option('-c', '--config', 'config_file', type=str, help="YAML config file")
-@option('-f', '--folder', default="INBOX", help="Destination folder (default: INBOX)")
-@option('-h', '--host', default="zoho", help="IMAP host (zoho, gmail, or hostname)")
-@option('-i', '--input', 'db_path', default="emails.db", help="SQLite database path (default: emails.db)")
+@require_init
+@option('-b', '--batch', 'checkpoint_interval', default=100, help="Mark progress every N messages")
+@option('-f', '--folder', default="INBOX", help="Destination folder")
 @option('-l', '--limit', type=int, help="Max emails to push")
-@option('-n', '--dry-run', is_flag=True, help="Show what would be pushed without sending")
-@option('-p', '--password', envvar="DST_PASS", help="IMAP password (or DST_PASS env)")
-@option('-u', '--user', envvar="DST_USER", help="IMAP username (or DST_USER env)")
-@option('-v', '--verbose', is_flag=True, help="Show each message pushed")
+@option('-n', '--dry-run', is_flag=True, help="Show what would be pushed")
+@option('-p', '--password', help="IMAP password (overrides account)")
+@tag_option
+@option('-u', '--user', help="IMAP username (overrides account)")
+@option('-v', '--verbose', is_flag=True, help="Show each message")
+@argument('account')
 def push(
     checkpoint_interval: int,
-    config_file: str | None,
     folder: str,
-    host: str,
-    db_path: str,
     limit: int | None,
     dry_run: bool,
     password: str | None,
+    tag: str | None,
     user: str | None,
     verbose: bool,
+    account: str,
 ):
-    """Push emails from local SQLite storage to IMAP destination.
+    """Push emails from local storage to IMAP destination.
 
     \b
     Examples:
-      eml push                              # Push to Zoho INBOX
-      eml push -f "Archive" -v              # Push to Archive folder, verbose
-      eml push -c push.yml                  # Use config file
-      eml push -n                           # Dry run
-
-    \b
-    Config file (push.yml):
-      dst:
-        type: zoho
-        folder: "INBOX"
-      storage: emails.db
+      eml push zoho                       # Push all to Zoho INBOX
+      eml push zoho -t work -f Work       # Push 'work' tagged to Work folder
+      eml ps zoho -n                      # Dry run
+      eml push zoho -l 10 -v              # Push 10, verbose
     """
-    # Load config file if provided
-    cfg: dict = {}
-    if config_file:
-        if not Path(config_file).exists():
-            err(f"Config file not found: {config_file}")
-            sys.exit(1)
-        cfg = load_config_file(config_file)
-
-    # Resolve destination config (CLI overrides config file)
-    dst_cfg = cfg.get("dst", {})
-    dst_type = dst_cfg.get("type", host)
-    dst_user = user or dst_cfg.get("user") or os.environ.get("DST_USER")
-    dst_password = password or dst_cfg.get("password") or os.environ.get("DST_PASS")
-    dst_folder = folder if folder != "INBOX" else dst_cfg.get("folder", folder)
-    db_path = db_path if db_path != "emails.db" else cfg.get("storage", db_path)
-
-    if not dst_user or not dst_password:
-        err("Missing credentials. Set DST_USER/DST_PASS env or use -u/-p flags.")
+    # Look up account
+    acct = get_account(account)
+    if not acct:
+        err(f"Account '{account}' not found.")
+        err("  eml account add zoho user@example.com")
         sys.exit(1)
 
-    if not Path(db_path).exists():
-        err(f"Database not found: {db_path}")
-        sys.exit(1)
+    dst_type = acct.type
+    dst_user = user or acct.user
+    dst_password = password or acct.password
+    dst_folder = folder
 
-    # Create IMAP client
-    if dst_type == "zoho" or "zoho" in dst_type.lower():
-        client = ZohoClient()
-    elif dst_type == "gmail" or "gmail" in dst_type.lower():
-        client = GmailClient()
-    else:
-        client = IMAPClient(dst_type)
-
-    echo(f"Storage: {db_path}")
     echo(f"Destination: {dst_type} ({dst_user})")
     echo(f"Folder: {dst_folder}")
+    if tag:
+        echo(f"Tag filter: {tag}")
     if dry_run:
         echo(style("DRY RUN - no changes will be made", fg="yellow"))
     echo()
 
     try:
         # Open storage
-        storage = EmailStorage(db_path)
+        msgs_path = get_msgs_db_path()
+        storage = MessageStorage(msgs_path)
         storage.connect()
 
-        total = storage.count()
+        total = storage.count(tag=tag)
         already_pushed = storage.count_pushed(dst_type, dst_user, dst_folder)
-        echo(f"Total messages in storage: {total:,}")
+        echo(f"Messages in storage{f' (tag: {tag})' if tag else ''}: {total:,}")
         echo(f"Already pushed to destination: {already_pushed:,}")
 
         # Get unpushed messages
-        unpushed = list(storage.iter_unpushed(dst_type, dst_user, dst_folder))
+        unpushed = list(storage.iter_unpushed(dst_type, dst_user, dst_folder, tag=tag))
         if limit:
             unpushed = unpushed[:limit]
 
@@ -417,9 +635,9 @@ def push(
             echo("Nothing to push.")
             return
 
+        client = get_imap_client(dst_type)
         if not dry_run:
             client.connect(dst_user, dst_password)
-            # Create folder if needed (Zoho-specific)
             if hasattr(client, 'create_folder'):
                 client.create_folder(dst_folder)
 
@@ -435,11 +653,10 @@ def push(
                     continue
 
                 try:
-                    # Append message to destination
                     success = client.conn.append(
                         dst_folder,
-                        None,  # flags
-                        imaplib.Time2Internaldate(msg.date.timetuple()) if msg.date else None,
+                        None,
+                        imaplib.Time2Internaldate(msg.date.timestamp()) if msg.date else None,
                         msg.raw,
                     )
                     if success[0] == "OK":
@@ -473,17 +690,22 @@ def push(
             client.disconnect()
 
 
+# ============================================================================
+# ls
+# ============================================================================
+
 @main.command()
-@option('-f', '--from', 'from_filter', type=str, help="Filter by From address (substring match)")
-@option('-i', '--input', 'db_path', default="emails.db", help="SQLite database path (default: emails.db)")
-@option('-l', '--limit', default=20, help="Max messages to show (default: 20)")
-@option('-s', '--subject', 'subject_filter', type=str, help="Filter by subject (substring match)")
+@require_init
+@option('-f', '--from', 'from_filter', type=str, help="Filter by From address")
+@option('-l', '--limit', default=20, help="Max messages to show")
+@option('-s', '--subject', 'subject_filter', type=str, help="Filter by subject")
+@tag_option
 @argument('query', required=False)
 def ls(
     from_filter: str | None,
-    db_path: str,
     limit: int,
     subject_filter: str | None,
+    tag: str | None,
     query: str | None,
 ):
     """List messages in local storage.
@@ -491,25 +713,29 @@ def ls(
     \b
     Examples:
       eml ls                              # List recent messages
+      eml ls -t work                      # List 'work' tagged messages
       eml ls -l 50                        # Show 50 messages
       eml ls -f "john@"                   # Filter by From
-      eml ls -s "invoice"                 # Filter by subject
       eml ls "search term"                # Search in From/Subject
     """
-    if not Path(db_path).exists():
-        err(f"Database not found: {db_path}")
-        sys.exit(1)
-
     try:
-        storage = EmailStorage(db_path)
+        msgs_path = get_msgs_db_path()
+        storage = MessageStorage(msgs_path)
         storage.connect()
 
-        total = storage.count()
-        echo(f"Total messages: {total:,}\n")
+        total = storage.count(tag=tag)
+        tag_info = f" (tag: {tag})" if tag else ""
+        echo(f"Total messages{tag_info}: {total:,}\n")
 
         # Build query
-        sql = "SELECT * FROM messages WHERE 1=1"
-        params: list = []
+        if tag:
+            sql = """SELECT m.* FROM messages m
+                     JOIN message_tags t ON m.message_id = t.message_id
+                     WHERE t.tag = ?"""
+            params: list = [tag]
+        else:
+            sql = "SELECT * FROM messages WHERE 1=1"
+            params = []
 
         if from_filter:
             sql += " AND from_addr LIKE ?"
@@ -544,40 +770,77 @@ def ls(
 
         storage.disconnect()
 
+    except FileNotFoundError as e:
+        err(str(e))
+        sys.exit(1)
     except Exception as e:
         err(f"Error: {e}")
         sys.exit(1)
 
 
+# ============================================================================
+# tags
+# ============================================================================
+
 @main.command()
-@option('-h', '--host', default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
-@option('-i', '--input', 'db_path', default="emails.db", help="SQLite database path (default: emails.db)")
-@option('-p', '--port', default=5000, help="Port to run on (default: 5000)")
-def serve(host: str, db_path: str, port: int):
+@require_init
+def tags():
+    """List all tags with message counts.
+
+    \b
+    Examples:
+      eml tags
+    """
+    try:
+        msgs_path = get_msgs_db_path()
+        storage = MessageStorage(msgs_path)
+        storage.connect()
+
+        tag_counts = storage.list_tags()
+
+        if not tag_counts:
+            echo("No tags found.")
+            return
+
+        echo("Tags:\n")
+        for tag, count in tag_counts:
+            echo(f"  {tag:20} {count:,} messages")
+
+        storage.disconnect()
+
+    except FileNotFoundError as e:
+        err(str(e))
+        sys.exit(1)
+
+
+# ============================================================================
+# serve
+# ============================================================================
+
+@main.command()
+@require_init
+@option('-h', '--host', default="127.0.0.1", help="Host to bind to")
+@option('-p', '--port', default=5000, help="Port to run on")
+def serve(host: str, port: int):
     """Start pmail web UI for browsing emails.
 
     \b
     Examples:
       eml serve                           # Start on http://127.0.0.1:5000
-      eml serve -p 8080                   # Use different port
-      eml serve -i work.db                # Use different database
-      eml serve -h 0.0.0.0                # Listen on all interfaces
+      eml s -p 8080                       # Use different port
     """
-    if not Path(db_path).exists():
-        err(f"Database not found: {db_path}")
-        sys.exit(1)
+    msgs_path = get_msgs_db_path()
 
-    # Import Flask app and configure
     www_path = Path(__file__).parent.parent.parent / "www"
     sys.path.insert(0, str(www_path))
 
     try:
-        from app import app, DB_PATH
+        from app import app
         import app as app_module
-        app_module.DB_PATH = Path(db_path).absolute()
+        app_module.DB_PATH = msgs_path.absolute()
 
         echo(f"Starting pmail on http://{host}:{port}")
-        echo(f"Database: {db_path}")
+        echo(f"Database: {msgs_path}")
         app.run(host=host, port=port, debug=True)
     except ImportError as e:
         err(f"Failed to import pmail app: {e}")
@@ -585,14 +848,18 @@ def serve(host: str, db_path: str, port: int):
         sys.exit(1)
 
 
+# ============================================================================
+# migrate (legacy)
+# ============================================================================
+
 @main.command()
-@option('-a', '--address', 'addresses', multiple=True, help="Match To/From/Cc address (repeatable)")
+@option('-a', '--address', 'addresses', multiple=True, help="Match To/From/Cc address")
 @option('-c', '--config', 'config_file', type=str, help="YAML config file")
-@option('-d', '--from-domain', 'from_domains', multiple=True, help="Match From domain only (repeatable)")
-@option('-D', '--domain', 'domains', multiple=True, help="Match To/From/Cc domain (repeatable)")
+@option('-d', '--from-domain', 'from_domains', multiple=True, help="Match From domain only")
+@option('-D', '--domain', 'domains', multiple=True, help="Match To/From/Cc domain")
 @option('-e', '--end-date', type=str, help="End date (YYYY-MM-DD)")
 @option('-f', '--folder', type=str, help="Destination folder")
-@option('-F', '--from-address', 'from_addresses', multiple=True, help="Match From address only (repeatable)")
+@option('-F', '--from-address', 'from_addresses', multiple=True, help="Match From address only")
 @option('-l', '--limit', type=int, help="Max emails to process")
 @option('-n', '--dry-run', is_flag=True, help="List matching emails without migrating")
 @option('-s', '--start-date', type=str, help="Start date (YYYY-MM-DD)")
@@ -610,42 +877,16 @@ def migrate(
     start_date: str | None,
     verbose: bool,
 ):
-    """Migrate emails between IMAP mailboxes (e.g., Gmail to Zoho).
+    """Migrate emails between IMAP mailboxes (legacy direct mode).
 
     \b
-    Config file (YAML):
-      eml migrate -c config.yml -n
+    This is the original direct IMAP-to-IMAP migration.
+    For the new workflow, use: eml pull, eml push
 
     \b
-    Example config.yml (see example.yml):
-      filters:
-        addresses:          # Match To/From/Cc (full address)
-          - team@googlegroups.com
-        domains:            # Match To/From/Cc (domain)
-          - company.com
-        from_addresses:     # Match From only (full address)
-          - person@example.com
-        from_domains:       # Match From only (domain)
-          - partner.org
-      folder: INBOX
-      start_date: 2020-01-01
-
-    \b
-    CLI options extend/override config file values.
-
-    \b
-    Filter options (at least one required, via -c or flags):
-      -a, --address       Match To/From/Cc (full address)
-      -D, --domain        Match To/From/Cc (domain)
-      -F, --from-address  Match From only (full address)
-      -d, --from-domain   Match From only (domain)
-
-    \b
-    Requires environment variables (or .env file):
-      GMAIL_USER          Source Gmail address
-      GMAIL_APP_PASSWORD  Gmail app password (requires 2FA)
-      ZOHO_USER           Destination Zoho address
-      ZOHO_PASSWORD       Zoho password or app password
+    Requires environment variables:
+      GMAIL_USER, GMAIL_APP_PASSWORD
+      ZOHO_USER, ZOHO_PASSWORD
     """
     # Load config file if provided
     cfg: dict = {}
@@ -655,7 +896,7 @@ def migrate(
             sys.exit(1)
         cfg = load_config_file(config_file)
 
-    # Build filters: CLI args override/extend config file
+    # Build filters
     cfg_filters = cfg.get("filters", {})
     all_addresses = list(cfg_filters.get("addresses", [])) + list(addresses)
     all_domains = list(cfg_filters.get("domains", [])) + list(domains)
@@ -670,10 +911,9 @@ def migrate(
     )
 
     if filters.is_empty():
-        err("Error: At least one filter required (-a, -D, -F, -d, or via -c config)")
+        err("Error: At least one filter required")
         sys.exit(1)
 
-    # Other options: CLI overrides config
     dest_folder = folder or cfg.get("folder", "INBOX")
     start_date_str = start_date or cfg.get("start_date")
     end_date_str = end_date or cfg.get("end_date")
@@ -697,16 +937,14 @@ def migrate(
 
     if missing:
         err(f"Missing required environment variables: {', '.join(missing)}")
-        err("Set them in .env or export them.")
         sys.exit(1)
 
-    # Parse dates (handle both string and date objects from YAML)
     def parse_date(val) -> datetime | None:
         if val is None:
             return None
         if isinstance(val, datetime):
             return val
-        if hasattr(val, 'isoformat'):  # date object
+        if hasattr(val, 'isoformat'):
             return datetime.combine(val, datetime.min.time())
         return datetime.fromisoformat(str(val))
 
@@ -732,9 +970,9 @@ def migrate(
 
     echo("Filters:")
     if all_addresses:
-        echo(f"  Addresses (To/From/Cc): {', '.join(all_addresses)}")
+        echo(f"  Addresses: {', '.join(all_addresses)}")
     if all_domains:
-        echo(f"  Domains (To/From/Cc): {', '.join(all_domains)}")
+        echo(f"  Domains: {', '.join(all_domains)}")
     if all_from_addresses:
         echo(f"  From addresses: {', '.join(all_from_addresses)}")
     if all_from_domains:
@@ -742,7 +980,7 @@ def migrate(
     if parsed_start or parsed_end:
         echo(f"  Date range: {format_date(parsed_start)} to {format_date(parsed_end)}")
     if dry_run:
-        echo(style("DRY RUN - no changes will be made", fg="yellow"))
+        echo(style("DRY RUN", fg="yellow"))
     echo()
 
     try:

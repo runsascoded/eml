@@ -10,7 +10,7 @@ from flask import Flask, render_template, request, abort
 
 # Add parent to path for eml imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from eml.storage import EmailStorage
+from eml.storage import MessageStorage
 
 app = Flask(__name__)
 
@@ -20,7 +20,7 @@ DB_PATH = Path(__file__).parent.parent / "emails.db"
 
 def get_storage():
     """Get connected storage instance."""
-    storage = EmailStorage(DB_PATH)
+    storage = MessageStorage(DB_PATH)
     storage.connect()
     return storage
 
