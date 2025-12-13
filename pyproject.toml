@@ -1,5 +1,5 @@
 [project]
-name = "eml"
+name = "eml-cli"
 version = "0.1.0"
 description = "Migrate emails between IMAP mailboxes with flexible filtering"
 requires-python = ">=3.11"
