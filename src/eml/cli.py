@@ -156,6 +156,7 @@ class AliasGroup(click.Group):
 # Main group with aliases
 @click.group(cls=AliasGroup, aliases={
     'a': 'account',
+    'cv': 'convert',
     'f': 'folders',
     'i': 'init',
     'p': 'pull',
@@ -1281,6 +1282,143 @@ def stats():
     except FileNotFoundError as e:
         err(str(e))
         sys.exit(1)
+
+
+# ============================================================================
+# convert
+# ============================================================================
+
+@main.command()
+@require_init
+@option('-n', '--dry-run', is_flag=True, help="Show what would be converted")
+@option('-D', '--delete-old', is_flag=True, help="Delete old storage after conversion")
+@argument('target_layout', type=click.Choice(LAYOUT_CHOICES))
+def convert(dry_run: bool, delete_old: bool, target_layout: str):
+    """Convert between storage layouts.
+
+    \b
+    Examples:
+      eml convert tree:month          # Convert to monthly sharding
+      eml convert tree:flat           # Flatten to single directory
+      eml convert sqlite              # Pack into SQLite database
+      eml convert sqlite -D           # Convert and delete old .eml files
+    """
+    root = find_eml_root()
+    if not root or not is_v2_project(root):
+        err("Convert requires a V2 project. Run 'eml init' first.")
+        sys.exit(1)
+
+    config = load_config(root)
+    current_layout = config.layout
+
+    if current_layout == target_layout:
+        echo(f"Already using {target_layout} layout.")
+        return
+
+    echo(f"Converting: {current_layout} → {target_layout}")
+    if dry_run:
+        echo(style("DRY RUN - no changes will be made", fg="yellow"))
+    echo()
+
+    # Get source layout
+    source = get_storage_layout(root)
+
+    # Count messages
+    messages = list(source.iter_messages())
+    echo(f"Messages to convert: {len(messages):,}")
+
+    if not messages:
+        echo("No messages to convert.")
+        return
+
+    if dry_run:
+        echo(f"\nWould convert {len(messages):,} messages to {target_layout}")
+        return
+
+    # Create target layout
+    if target_layout == "sqlite":
+        target = SqliteLayout(root)
+        target.connect()
+    else:
+        scheme = target_layout.split(":")[1] if ":" in target_layout else "month"
+        target = TreeLayout(root, sharding=scheme)
+
+    console = Console()
+    converted = 0
+    failed = 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]Converting"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("convert", total=len(messages))
+
+        for msg in messages:
+            try:
+                target.add_message(
+                    message_id=msg.message_id,
+                    raw=msg.raw,
+                    folder=msg.folder,
+                    date=msg.date,
+                    from_addr=msg.from_addr,
+                    to_addr=msg.to_addr,
+                    cc_addr=msg.cc_addr,
+                    subject=msg.subject,
+                    source_uid=msg.source_uid,
+                )
+                converted += 1
+            except Exception as e:
+                failed += 1
+                console.print(f"  [red]✗[/] {msg.message_id[:40]}: {e}")
+
+            progress.advance(task)
+
+    # Update config
+    config.layout = target_layout
+    save_config(config, root)
+
+    echo()
+    echo(f"Converted: {converted:,}")
+    if failed:
+        echo(style(f"Failed: {failed}", fg="red"))
+
+    # Cleanup old storage
+    if delete_old and converted > 0:
+        echo()
+        if current_layout == "sqlite":
+            old_db = root / ".eml" / "msgs.db"
+            if old_db.exists():
+                old_db.unlink()
+                echo(f"Deleted: {old_db}")
+        else:
+            # Delete .eml files (but not .eml/ directory)
+            deleted = 0
+            for eml_file in root.rglob("*.eml"):
+                if ".eml" not in eml_file.parts[:-1]:  # Skip .eml/ dir
+                    eml_file.unlink()
+                    deleted += 1
+                    # Remove empty parent dirs
+                    parent = eml_file.parent
+                    while parent != root:
+                        try:
+                            parent.rmdir()
+                            parent = parent.parent
+                        except OSError:
+                            break
+            echo(f"Deleted: {deleted:,} .eml files")
+
+    # Cleanup
+    if hasattr(source, 'disconnect'):
+        source.disconnect()
+    if hasattr(target, 'disconnect'):
+        target.disconnect()
+
+    echo(f"\nLayout updated to: {target_layout}")
 
 
 # ============================================================================

@@ -2,22 +2,26 @@
 
 ## Project Overview
 
-CLI tool for migrating emails between IMAP servers via local SQLite storage.
+CLI tool for migrating emails between IMAP servers via local storage.
 
-## Architecture
+## Architecture (V2)
 
 ```
-Source IMAP → pull → .eml/msgs.db → push → Destination IMAP
+Source IMAP → pull → .eml files / sqlite → push → Destination IMAP
 ```
 
-- `.eml/msgs.db` - messages, sync_state, push_state, message_tags
-- `.eml/accts.db` - local account credentials
-- `~/.config/eml/accts.db` - global account credentials (fallback)
+V2 uses Git for versioning with branch = migration pipeline model:
+- `.eml/config.yaml` - accounts, credentials, layout setting
+- `.eml/sync-state/<account>.yaml` - UIDVALIDITY, last UID per folder
+- `.eml/pushed/<account>.txt` - Message-IDs already pushed
+- `INBOX/*.eml`, `Sent/*.eml`, etc. (tree layouts) or `.eml/msgs.db` (sqlite)
 
 ## Key Files
 
 - `src/eml/cli.py` - Click CLI with command aliases
-- `src/eml/storage.py` - `MessageStorage`, `AccountStorage` classes
+- `src/eml/config.py` - V2 config/state via YAML files
+- `src/eml/layouts/` - `StorageLayout` protocol, `TreeLayout`, `SqliteLayout`
+- `src/eml/storage.py` - V1 `MessageStorage`, `AccountStorage` classes
 - `src/eml/imap.py` - `GmailClient`, `ZohoClient`, `IMAPClient`
 - `www/app.py` - Flask pmail web UI
 
@@ -27,25 +31,42 @@ Source IMAP → pull → .eml/msgs.db → push → Destination IMAP
 |-------|---------|
 | `i` | `init` |
 | `a` | `account` (`a a`=add, `a l`=ls, `a r`=rm) |
+| `cv` | `convert` |
 | `f` | `folders` |
 | `p` | `pull` |
 | `ps` | `push` |
 | `st` | `stats` |
 | `s` | `serve` |
 
+## Storage Layouts
+
+| Layout | Storage |
+|--------|---------|
+| `tree:flat` | `INBOX/a1b2c3d4.eml` |
+| `tree:year` | `INBOX/2024/a1b2c3d4.eml` |
+| `tree:month` | `INBOX/2024/01/a1b2c3d4.eml` (default) |
+| `tree:day` | `INBOX/2024/01/15/a1b2c3d4.eml` |
+| `tree:hash2` | `INBOX/a1/b2c3d4e5.eml` |
+| `sqlite` | `.eml/msgs.db` |
+
 ## Common Patterns
 
-- Shared options: `tag_option = option('-t', '--tag', ...)`
+- `is_v2_project()` / `get_storage_layout()` for V1/V2 detection
+- `StorageLayout` protocol with `iter_messages()`, `add_message()`, `has_message()`
+- Account names support `/` for namespacing (e.g., `y/user`, `g/user`)
 - `@require_init` decorator for commands needing `.eml/`
-- `AliasGroup` class for command aliases
-- Account cascade: `get_account()` checks local then global
 
 ## Testing
 
 ```bash
-eml init
-eml a a gmail user@gmail.com
-eml p gmail -f INBOX -l 10
+eml init                                    # V2 with tree:month
+eml init -L sqlite                          # V2 with SQLite
+eml init -V                                 # V1 legacy
+
+eml a a -t imap y/user user@example.com --host imap.example.com
+eml a a -t gmail g/user user@gmail.com
+eml p y/user -f INBOX -l 10
 eml ls
-eml ps zoho -n
+eml ps g/user -n
+eml cv tree:flat                            # convert layout
 ```
