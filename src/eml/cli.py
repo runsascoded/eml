@@ -140,6 +140,10 @@ class AliasGroup(click.Group):
     def __init__(self, *args, aliases: dict[str, str] | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.aliases = aliases or {}
+        # Build reverse mapping: command -> list of aliases
+        self._cmd_aliases: dict[str, list[str]] = {}
+        for alias, cmd in self.aliases.items():
+            self._cmd_aliases.setdefault(cmd, []).append(alias)
 
     def get_command(self, ctx, cmd_name):
         # Check for alias
@@ -151,6 +155,26 @@ class AliasGroup(click.Group):
         _, cmd_name, args = super().resolve_command(ctx, args)
         cmd_name = self.aliases.get(cmd_name, cmd_name)
         return _, cmd_name, args
+
+    def format_commands(self, ctx, formatter):
+        """Write all commands with their aliases to the formatter."""
+        commands = []
+        for subcommand in self.list_commands(ctx):
+            cmd = self.get_command(ctx, subcommand)
+            if cmd is None or cmd.hidden:
+                continue
+            # Get aliases for this command
+            aliases = self._cmd_aliases.get(subcommand, [])
+            if aliases:
+                name = f"{subcommand} ({', '.join(sorted(aliases))})"
+            else:
+                name = subcommand
+            help_text = cmd.get_short_help_str(limit=formatter.width)
+            commands.append((name, help_text))
+
+        if commands:
+            with formatter.section("Commands"):
+                formatter.write_dl(commands)
 
 
 # Main group with aliases
