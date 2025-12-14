@@ -267,7 +267,7 @@ def init(use_global: bool, layout: str, v1: bool):
 @main.group(cls=AliasGroup, aliases={
     'a': 'add',
     'l': 'ls',
-    'r': 'rm',
+    'r': 'rename',
 })
 def account():
     """Manage IMAP accounts."""
@@ -461,6 +461,69 @@ def account_rm(use_global: bool, name: str):
     else:
         err(f"Account '{name}' not found.")
         sys.exit(1)
+
+
+@account.command("rename", no_args_is_help=True)
+@option('-g', '--global', 'use_global', is_flag=True, help="Rename in global config")
+@argument('old_name')
+@argument('new_name')
+def account_rename(use_global: bool, old_name: str, new_name: str):
+    """Rename an account.
+
+    \b
+    Examples:
+      eml account rename gmail g/user
+      eml a mv y/old y/new           # using aliases
+    """
+    if use_global:
+        accts_path = GLOBAL_CONFIG_DIR / ACCTS_DB
+        if not accts_path.exists():
+            err(f"No accounts database: {accts_path}")
+            sys.exit(1)
+        with AccountStorage(accts_path) as storage:
+            acct = storage.get(old_name)
+            if not acct:
+                err(f"Account '{old_name}' not found.")
+                sys.exit(1)
+            storage.remove(old_name)
+            storage.add(new_name, acct.type, acct.user, acct.password)
+        echo(f"Account renamed: '{old_name}' → '{new_name}' [global]")
+        return
+
+    # Check for V2 project
+    root = find_eml_root()
+    if root and is_v2_project(root):
+        config = load_config(root)
+        if old_name not in config.accounts:
+            err(f"Account '{old_name}' not found.")
+            sys.exit(1)
+        if new_name in config.accounts:
+            err(f"Account '{new_name}' already exists.")
+            sys.exit(1)
+        # Rename by moving the entry
+        config.accounts[new_name] = config.accounts.pop(old_name)
+        config.accounts[new_name].name = new_name
+        save_config(config, root)
+        echo(f"Account renamed: '{old_name}' → '{new_name}' [config.yaml]")
+        return
+
+    # V1: rename in accts.db
+    eml_dir = find_eml_dir()
+    if not eml_dir:
+        err("Not in an eml project. Run 'eml init' first, or use -g for global.")
+        sys.exit(1)
+    accts_path = eml_dir / ACCTS_DB
+    if not accts_path.exists():
+        err(f"No accounts database: {accts_path}")
+        sys.exit(1)
+    with AccountStorage(accts_path) as storage:
+        acct = storage.get(old_name)
+        if not acct:
+            err(f"Account '{old_name}' not found.")
+            sys.exit(1)
+        storage.remove(old_name)
+        storage.add(new_name, acct.type, acct.user, acct.password)
+    echo(f"Account renamed: '{old_name}' → '{new_name}'")
 
 
 # ============================================================================
