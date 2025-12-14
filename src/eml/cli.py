@@ -274,7 +274,7 @@ def account():
     pass
 
 
-@account.command("add")
+@account.command("add", no_args_is_help=True)
 @option('-g', '--global', 'use_global', is_flag=True, help="Add to global config")
 @option('-H', '--host', help="IMAP host (for generic imap type)")
 @option('-p', '--password', 'password_opt', help="Password (prompts if not provided)")
@@ -407,7 +407,7 @@ def account_ls(show_all: bool, use_global: bool):
         echo("  eml account add g/user gmail user@gmail.com")
 
 
-@account.command("rm")
+@account.command("rm", no_args_is_help=True)
 @option('-g', '--global', 'use_global', is_flag=True, help="Remove from global config")
 @argument('name')
 def account_rm(use_global: bool, name: str):
@@ -467,7 +467,7 @@ def account_rm(use_global: bool, name: str):
 # folders
 # ============================================================================
 
-@main.command()
+@main.command(no_args_is_help=True)
 @option('-p', '--password', help="IMAP password")
 @option('-s', '--size', is_flag=True, help="Show total size of messages")
 @option('-u', '--user', help="IMAP username")
@@ -485,7 +485,7 @@ def folders(password: str | None, size: bool, user: str | None, account_or_folde
     # Parse arguments
     acct = None
     if account_or_folder:
-        acct = get_account(account_or_folder)
+        acct = get_account_any(account_or_folder)
         if not acct:
             # Maybe it's a folder name with explicit creds?
             if user and password:
@@ -508,7 +508,11 @@ def folders(password: str | None, size: bool, user: str | None, account_or_folde
         err("Missing credentials. Use an account name or -u/-p flags.")
         sys.exit(1)
 
-    client = get_imap_client(src_type)
+    # Create IMAP client - use host for generic imap accounts
+    if isinstance(acct, AccountConfig) and acct.host:
+        client = IMAPClient(acct.host, acct.port)
+    else:
+        client = get_imap_client(src_type)
 
     try:
         client.connect(src_user, src_password)
@@ -541,7 +545,7 @@ def folders(password: str | None, size: bool, user: str | None, account_or_folde
 # pull
 # ============================================================================
 
-@main.command()
+@main.command(no_args_is_help=True)
 @require_init
 @option('-b', '--batch', 'checkpoint_interval', default=100, help="Save progress every N messages")
 @option('-f', '--folder', type=str, help="Source folder")
@@ -792,7 +796,7 @@ def pull(
 # push
 # ============================================================================
 
-@main.command()
+@main.command(no_args_is_help=True)
 @require_init
 @option('-b', '--batch', 'checkpoint_interval', default=100, help="Mark progress every N messages")
 @option('-d', '--delay', type=float, default=0, help="Delay between messages (seconds)")
@@ -1288,7 +1292,7 @@ def stats():
 # convert
 # ============================================================================
 
-@main.command()
+@main.command(no_args_is_help=True)
 @require_init
 @option('-n', '--dry-run', is_flag=True, help="Show what would be converted")
 @option('-D', '--delete-old', is_flag=True, help="Delete old storage after conversion")
