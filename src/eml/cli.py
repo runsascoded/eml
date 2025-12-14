@@ -24,10 +24,51 @@ from .storage import (
     EML_DIR, MSGS_DB, ACCTS_DB, GLOBAL_CONFIG_DIR,
     find_eml_dir, get_eml_dir, get_msgs_db_path, get_account,
 )
+from .config import (
+    EmlConfig, AccountConfig, LayoutType,
+    find_eml_root, get_eml_root, load_config, save_config,
+    get_folder_sync_state, set_folder_sync_state,
+    load_pushed, mark_pushed, is_pushed,
+)
+from .layouts import StorageLayout, StoredMessage, TreeLayout, SqliteLayout
 
 
 def err(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
+
+
+def is_v2_project(root: Path | None = None) -> bool:
+    """Check if this is a V2 project (has config.yaml)."""
+    root = root or find_eml_root()
+    if not root:
+        return False
+    return (root / ".eml" / "config.yaml").exists()
+
+
+def get_storage_layout(root: Path | None = None) -> StorageLayout:
+    """Get the storage layout for the current project."""
+    root = root or get_eml_root()
+    config = load_config(root)
+
+    if config.layout == "sqlite":
+        layout = SqliteLayout(root)
+        layout.connect()
+        return layout
+    else:
+        # Parse tree:X format
+        scheme = config.layout.split(":")[1] if ":" in config.layout else "month"
+        return TreeLayout(root, sharding=scheme)
+
+
+def get_account_any(name: str) -> Account | AccountConfig | None:
+    """Get account by name, checking V2 config.yaml first, then V1 accts.db."""
+    root = find_eml_root()
+    if root and is_v2_project(root):
+        config = load_config(root)
+        if name in config.accounts:
+            return config.accounts[name]
+    # Fall back to V1
+    return get_account(name)
 
 
 def format_date(dt: datetime | None) -> str:
@@ -131,15 +172,22 @@ def main():
 # init
 # ============================================================================
 
+LAYOUT_CHOICES = ["tree:flat", "tree:year", "tree:month", "tree:day", "tree:hash2", "sqlite"]
+
+
 @main.command()
 @option('-g', '--global', 'use_global', is_flag=True, help="Initialize global config (~/.config/eml)")
-def init(use_global: bool):
+@option('-L', '--layout', type=click.Choice(LAYOUT_CHOICES), default="tree:month", help="Storage layout")
+@option('-V', '--v1', is_flag=True, help="Use V1 SQLite-only format (deprecated)")
+def init(use_global: bool, layout: str, v1: bool):
     """Initialize eml project directory.
 
     \b
     Examples:
-      eml init              # Create .eml/ in current directory
-      eml init -g           # Create ~/.config/eml/ for global accounts
+      eml init                       # Create .eml/ with tree:month layout
+      eml init -L sqlite             # Use SQLite blob storage
+      eml init -L tree:flat          # Flat directory structure
+      eml init -g                    # Create ~/.config/eml/ for global accounts
     """
     if use_global:
         target = GLOBAL_CONFIG_DIR
@@ -148,24 +196,67 @@ def init(use_global: bool):
         with AccountStorage(accts_path) as storage:
             pass  # Just create schema
         echo(f"Initialized global config: {target}")
-    else:
+        return
+
+    if v1:
+        # Legacy V1 initialization
         eml_dir = Path.cwd() / EML_DIR
         if eml_dir.exists():
             echo(f"Already initialized: {eml_dir}")
             return
         eml_dir.mkdir(parents=True)
-        # Create empty databases with schema
         with MessageStorage(eml_dir / MSGS_DB) as storage:
             pass
         with AccountStorage(eml_dir / ACCTS_DB) as storage:
             pass
-        echo(f"Initialized: {eml_dir}")
+        echo(f"Initialized (V1): {eml_dir}")
         echo(f"  {MSGS_DB}   - message storage")
         echo(f"  {ACCTS_DB}  - account credentials")
         echo()
         echo("Next steps:")
         echo("  eml account add gmail user@gmail.com")
         echo("  eml pull gmail -f INBOX")
+        return
+
+    # V2 initialization
+    root = Path.cwd()
+    eml_dir = root / EML_DIR
+    config_path = eml_dir / "config.yaml"
+
+    if config_path.exists():
+        echo(f"Already initialized (V2): {eml_dir}")
+        return
+
+    # Create .eml directory structure
+    eml_dir.mkdir(parents=True, exist_ok=True)
+    (eml_dir / "sync-state").mkdir(exist_ok=True)
+    (eml_dir / "pushed").mkdir(exist_ok=True)
+
+    # Create config.yaml
+    config = EmlConfig(layout=layout)
+    save_config(config, root)
+
+    # Initialize sqlite db if using sqlite layout
+    if layout == "sqlite":
+        with SqliteLayout(root) as storage:
+            pass
+
+    # Initialize git if not already a repo
+    git_dir = root / ".git"
+    if not git_dir.exists():
+        import subprocess
+        subprocess.run(["git", "init"], cwd=root, capture_output=True)
+        echo("Initialized git repository")
+
+    echo(f"Initialized (V2): {eml_dir}")
+    echo(f"  config.yaml   - accounts and layout ({layout})")
+    echo(f"  sync-state/   - pull progress per account")
+    echo(f"  pushed/       - push manifests per account")
+    echo()
+    echo("Next steps:")
+    echo("  eml account add y/user imap user@example.com --host imap.example.com")
+    echo("  eml account add g/user gmail user@gmail.com")
+    echo("  eml pull y/user -f INBOX")
 
 
 # ============================================================================
@@ -184,19 +275,30 @@ def account():
 
 @account.command("add")
 @option('-g', '--global', 'use_global', is_flag=True, help="Add to global config")
+@option('-H', '--host', help="IMAP host (for generic imap type)")
 @option('-p', '--password', 'password_opt', help="Password (prompts if not provided)")
-@option('-t', '--type', 'acct_type', help="Account type (gmail, zoho, or hostname)")
+@option('-P', '--port', type=int, default=993, help="IMAP port")
+@option('-t', '--type', 'acct_type', help="Account type (gmail, zoho, imap)")
 @argument('name')
 @argument('user')
-def account_add(use_global: bool, password_opt: str | None, acct_type: str | None, name: str, user: str):
+def account_add(
+    use_global: bool,
+    host: str | None,
+    password_opt: str | None,
+    port: int,
+    acct_type: str | None,
+    name: str,
+    user: str,
+):
     """Add or update an account.
 
     \b
     Examples:
-      eml account add gmail user@gmail.com
+      eml account add g/user gmail user@gmail.com
+      eml account add y/user imap user@example.com --host imap.example.com
       eml a a gmail user@gmail.com              # using aliases
       echo "$PASS" | eml account add zoho user@example.com
-      eml account add gmail user@gmail.com -g   # global account
+      eml account add gmail user@gmail.com -g   # global account (V1 only)
     """
     password = get_password(password_opt)
 
@@ -210,23 +312,39 @@ def account_add(use_global: bool, password_opt: str | None, acct_type: str | Non
             err(f"Cannot infer account type from '{name}'. Use -t to specify.")
             sys.exit(1)
 
-    # Determine where to store
+    # Global accounts always use V1 SQLite
     if use_global:
         accts_path = GLOBAL_CONFIG_DIR / ACCTS_DB
         GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        location = "global"
+        with AccountStorage(accts_path) as storage:
+            storage.add(name, acct_type, user, password)
+        echo(f"Account '{name}' saved ({acct_type}: {user}) [global]")
+        return
+
+    # Check for V2 project
+    root = find_eml_root()
+    if root and is_v2_project(root):
+        # V2: store in config.yaml
+        config = load_config(root)
+        config.accounts[name] = AccountConfig(
+            name=name,
+            type=acct_type,
+            user=user,
+            password=password,
+            host=host,
+            port=port,
+        )
+        save_config(config, root)
+        echo(f"Account '{name}' saved ({acct_type}: {user}) [config.yaml]")
     else:
+        # V1: store in accts.db
         eml_dir = find_eml_dir()
         if not eml_dir:
             err("Not in an eml project. Run 'eml init' first, or use -g for global.")
             sys.exit(1)
-        accts_path = eml_dir / ACCTS_DB
-        location = "local"
-
-    with AccountStorage(accts_path) as storage:
-        storage.add(name, acct_type, user, password)
-
-    echo(f"Account '{name}' saved ({acct_type}: {user}) [{location}]")
+        with AccountStorage(eml_dir / ACCTS_DB) as storage:
+            storage.add(name, acct_type, user, password)
+        echo(f"Account '{name}' saved ({acct_type}: {user}) [local]")
 
 
 @account.command("ls")
@@ -242,24 +360,37 @@ def account_ls(show_all: bool, use_global: bool):
       eml account ls -g     # global accounts only
       eml account ls -a     # both local and global
     """
-    eml_dir = find_eml_dir()
-    local_accts_path = eml_dir / ACCTS_DB if eml_dir else None
-    global_accts_path = GLOBAL_CONFIG_DIR / ACCTS_DB
-
     accounts_found = False
 
-    # Local accounts
-    if not use_global and local_accts_path and local_accts_path.exists():
-        with AccountStorage(local_accts_path) as storage:
-            accounts = storage.list()
-        if accounts:
+    # V2 local accounts (config.yaml)
+    root = find_eml_root()
+    if not use_global and root and is_v2_project(root):
+        config = load_config(root)
+        if config.accounts:
             accounts_found = True
-            echo(f"Local accounts ({local_accts_path}):\n")
-            for acct in accounts:
-                echo(f"  {acct.name:15} {acct.type:10} {acct.user}")
+            config_path = root / ".eml" / "config.yaml"
+            echo(f"Accounts ({config_path}):\n")
+            for name, acct in sorted(config.accounts.items()):
+                host_info = f" ({acct.host})" if acct.host else ""
+                echo(f"  {name:20} {acct.type:10} {acct.user}{host_info}")
             echo()
 
-    # Global accounts
+    # V1 local accounts (accts.db)
+    eml_dir = find_eml_dir()
+    if not use_global and eml_dir and not is_v2_project():
+        local_accts_path = eml_dir / ACCTS_DB
+        if local_accts_path.exists():
+            with AccountStorage(local_accts_path) as storage:
+                accounts = storage.list()
+            if accounts:
+                accounts_found = True
+                echo(f"Local accounts ({local_accts_path}):\n")
+                for acct in accounts:
+                    echo(f"  {acct.name:20} {acct.type:10} {acct.user}")
+                echo()
+
+    # Global accounts (V1 SQLite)
+    global_accts_path = GLOBAL_CONFIG_DIR / ACCTS_DB
     if (use_global or show_all or not accounts_found) and global_accts_path.exists():
         with AccountStorage(global_accts_path) as storage:
             accounts = storage.list()
@@ -267,12 +398,12 @@ def account_ls(show_all: bool, use_global: bool):
             accounts_found = True
             echo(f"Global accounts ({global_accts_path}):\n")
             for acct in accounts:
-                echo(f"  {acct.name:15} {acct.type:10} {acct.user}")
+                echo(f"  {acct.name:20} {acct.type:10} {acct.user}")
             echo()
 
     if not accounts_found:
         echo("No accounts configured.")
-        echo("  eml account add gmail user@gmail.com")
+        echo("  eml account add g/user gmail user@gmail.com")
 
 
 @account.command("rm")
@@ -288,20 +419,42 @@ def account_rm(use_global: bool, name: str):
     """
     if use_global:
         accts_path = GLOBAL_CONFIG_DIR / ACCTS_DB
-    else:
-        eml_dir = find_eml_dir()
-        if not eml_dir:
-            err("Not in an eml project. Run 'eml init' first, or use -g for global.")
+        if not accts_path.exists():
+            err(f"No accounts database: {accts_path}")
             sys.exit(1)
-        accts_path = eml_dir / ACCTS_DB
+        with AccountStorage(accts_path) as storage:
+            removed = storage.remove(name)
+        if removed:
+            echo(f"Account '{name}' removed [global].")
+        else:
+            err(f"Account '{name}' not found.")
+            sys.exit(1)
+        return
 
+    # Check for V2 project
+    root = find_eml_root()
+    if root and is_v2_project(root):
+        config = load_config(root)
+        if name in config.accounts:
+            del config.accounts[name]
+            save_config(config, root)
+            echo(f"Account '{name}' removed [config.yaml].")
+        else:
+            err(f"Account '{name}' not found.")
+            sys.exit(1)
+        return
+
+    # V1: remove from accts.db
+    eml_dir = find_eml_dir()
+    if not eml_dir:
+        err("Not in an eml project. Run 'eml init' first, or use -g for global.")
+        sys.exit(1)
+    accts_path = eml_dir / ACCTS_DB
     if not accts_path.exists():
         err(f"No accounts database: {accts_path}")
         sys.exit(1)
-
     with AccountStorage(accts_path) as storage:
         removed = storage.remove(name)
-
     if removed:
         echo(f"Account '{name}' removed.")
     else:
@@ -414,29 +567,35 @@ def pull(
     \b
     Examples:
       eml pull gmail                      # Pull from Gmail All Mail
-      eml pull gmail -f "Work" -t work    # Pull Work label, tag as 'work'
-      eml p gmail -f INBOX -l 100         # Pull first 100 from INBOX
+      eml pull y/user -f INBOX -l 100     # Pull first 100 from INBOX
       eml pull gmail -n                   # Dry run
     """
     # Look up account
-    acct = get_account(account)
+    acct = get_account_any(account)
     if not acct:
         err(f"Account '{account}' not found.")
-        err("  eml account add gmail user@gmail.com")
+        err("  eml account add g/user gmail user@gmail.com")
         sys.exit(1)
 
     src_type = acct.type
     src_user = user or acct.user
     src_password = password or acct.password
 
+    # Determine if V2 project
+    root = find_eml_root()
+    use_v2 = root and is_v2_project(root)
+
     # Create IMAP client
-    client = get_imap_client(src_type)
+    if use_v2 and isinstance(acct, AccountConfig) and acct.host:
+        client = IMAPClient(acct.host, acct.port)
+    else:
+        client = get_imap_client(src_type)
     src_folder = folder or (client.all_mail_folder if hasattr(client, 'all_mail_folder') else "INBOX")
 
     echo(f"Source: {src_type} ({src_user})")
     echo(f"Folder: {src_folder}")
-    if tag:
-        echo(f"Tag: {tag}")
+    if use_v2:
+        echo(f"Layout: {load_config(root).layout}")
     if dry_run:
         echo(style("DRY RUN - no changes will be made", fg="yellow"))
     echo()
@@ -446,21 +605,28 @@ def pull(
         count, uidvalidity = client.select_folder(src_folder, readonly=True)
         echo(f"Folder has {count:,} messages (UIDVALIDITY: {uidvalidity})")
 
-        # Open storage
-        msgs_path = get_msgs_db_path()
-        storage = MessageStorage(msgs_path)
-        if not dry_run:
-            storage.connect()
+        # Open storage (V1 vs V2)
+        if use_v2:
+            layout = get_storage_layout(root) if not dry_run else None
+        else:
+            msgs_path = get_msgs_db_path()
+            storage = MessageStorage(msgs_path)
+            if not dry_run:
+                storage.connect()
 
         # Check sync state
         stored_uidvalidity, last_uid = (None, None)
         if not dry_run:
-            stored_uidvalidity, last_uid = storage.get_sync_state(src_type, src_user, src_folder)
+            if use_v2:
+                sync_state = get_folder_sync_state(account, src_folder, root)
+                if sync_state:
+                    stored_uidvalidity = sync_state.uidvalidity
+                    last_uid = sync_state.last_uid
+            else:
+                stored_uidvalidity, last_uid = storage.get_sync_state(src_type, src_user, src_folder)
 
         if stored_uidvalidity and stored_uidvalidity != uidvalidity:
             echo(style(f"UIDVALIDITY changed ({stored_uidvalidity} → {uidvalidity}), doing full sync", fg="yellow"))
-            if not dry_run:
-                storage.clear_sync_state(src_type, src_user, src_folder)
             last_uid = None
 
         # Get UIDs to fetch
@@ -486,7 +652,10 @@ def pull(
 
         def save_checkpoint():
             if not dry_run and max_uid > 0:
-                storage.set_sync_state(src_type, src_user, src_folder, uidvalidity, max_uid)
+                if use_v2:
+                    set_folder_sync_state(account, src_folder, uidvalidity, max_uid, root)
+                else:
+                    storage.set_sync_state(src_type, src_user, src_folder, uidvalidity, max_uid)
 
         def print_result(status: str, subj: str, detail: str | None = None):
             """Print a result line (scrollable) above the progress bar."""
@@ -531,12 +700,14 @@ def pull(
                 subj = (info.subject or "(no subject)")[:60]
 
                 # Check if already stored
-                if not dry_run and storage.has_message(info.message_id):
-                    skipped += 1
-                    if verbose:
-                        print_result("skip", subj)
-                    progress.advance(task)
-                    continue
+                if not dry_run:
+                    has_msg = layout.has_message(info.message_id) if use_v2 else storage.has_message(info.message_id)
+                    if has_msg:
+                        skipped += 1
+                        if verbose:
+                            print_result("skip", subj)
+                        progress.advance(task)
+                        continue
 
                 if dry_run:
                     if verbose:
@@ -548,18 +719,31 @@ def pull(
                 # Fetch full message and store
                 try:
                     raw = client.fetch_raw(uid)
-                    storage.add_message(
-                        message_id=info.message_id,
-                        raw=raw,
-                        date=info.date,
-                        from_addr=info.from_addr,
-                        to_addr=info.to_addr,
-                        cc_addr=info.cc_addr,
-                        subject=info.subject,
-                        source_folder=src_folder,
-                        source_uid=str(uid_int),
-                        tags=[tag] if tag else None,
-                    )
+                    if use_v2:
+                        layout.add_message(
+                            message_id=info.message_id,
+                            raw=raw,
+                            folder=src_folder,
+                            date=info.date,
+                            from_addr=info.from_addr,
+                            to_addr=info.to_addr,
+                            cc_addr=info.cc_addr,
+                            subject=info.subject,
+                            source_uid=str(uid_int),
+                        )
+                    else:
+                        storage.add_message(
+                            message_id=info.message_id,
+                            raw=raw,
+                            date=info.date,
+                            from_addr=info.from_addr,
+                            to_addr=info.to_addr,
+                            cc_addr=info.cc_addr,
+                            subject=info.subject,
+                            source_folder=src_folder,
+                            source_uid=str(uid_int),
+                            tags=[tag] if tag else None,
+                        )
                     fetched += 1
                     if verbose:
                         print_result("ok", subj)
@@ -584,12 +768,17 @@ def pull(
             echo(f"Fetched: {fetched}")
             if skipped:
                 echo(f"Skipped (duplicate): {skipped}")
-            echo(f"Total in storage: {storage.count():,}")
+            msg_count = layout.count() if use_v2 else storage.count()
+            echo(f"Total in storage: {msg_count:,}")
         if failed:
             echo(style(f"Failed: {failed}", fg="red"))
 
+        # Cleanup
         if not dry_run:
-            storage.disconnect()
+            if use_v2 and hasattr(layout, 'disconnect'):
+                layout.disconnect()
+            elif not use_v2:
+                storage.disconnect()
 
     except Exception as e:
         err(f"Error: {e}")
@@ -635,15 +824,15 @@ def push(
     \b
     Examples:
       eml push zoho                       # Push all to Zoho INBOX
-      eml push zoho -t work -f Work       # Push 'work' tagged to Work folder
+      eml push g/user -f INBOX            # Push to destination account
       eml ps zoho -n                      # Dry run
       eml push zoho -l 10 -v              # Push 10, verbose
     """
     # Look up account
-    acct = get_account(account)
+    acct = get_account_any(account)
     if not acct:
         err(f"Account '{account}' not found.")
-        err("  eml account add zoho user@example.com")
+        err("  eml account add g/user gmail user@example.com")
         sys.exit(1)
 
     dst_type = acct.type
@@ -651,31 +840,44 @@ def push(
     dst_password = password or acct.password
     dst_folder = folder
 
+    # Determine if V2 project
+    root = find_eml_root()
+    use_v2 = root and is_v2_project(root)
+
     echo(f"Destination: {dst_type} ({dst_user})")
     echo(f"Folder: {dst_folder}")
-    if tag:
-        echo(f"Tag filter: {tag}")
+    if use_v2:
+        echo(f"Layout: {load_config(root).layout}")
     if dry_run:
         echo(style("DRY RUN - no changes will be made", fg="yellow"))
     echo()
 
     client = None
     try:
-        # Open storage
-        msgs_path = get_msgs_db_path()
-        storage = MessageStorage(msgs_path)
-        storage.connect()
+        if use_v2:
+            # V2: use layout and pushed/<account>.txt
+            layout = get_storage_layout(root)
+            pushed_set = load_pushed(account, root)
 
-        total = storage.count(tag=tag)
-        already_pushed = storage.count_pushed(dst_type, dst_user, dst_folder)
-        echo(f"Messages in storage{f' (tag: {tag})' if tag else ''}: {total:,}")
-        echo(f"Already pushed to destination: {already_pushed:,}")
+            # Get all messages and filter out already pushed
+            all_msgs = list(layout.iter_messages())
+            total_count = len(all_msgs)
+            already_pushed_count = len(pushed_set)
+            unpushed = [m for m in all_msgs if m.message_id not in pushed_set]
+        else:
+            # V1: use SQL storage
+            msgs_path = get_msgs_db_path()
+            storage = MessageStorage(msgs_path)
+            storage.connect()
+            total_count = storage.count(tag=tag)
+            already_pushed_count = storage.count_pushed(dst_type, dst_user, dst_folder)
+            unpushed = list(storage.iter_unpushed(dst_type, dst_user, dst_folder, tag=tag))
 
-        # Get unpushed messages
-        unpushed = list(storage.iter_unpushed(dst_type, dst_user, dst_folder, tag=tag))
         if limit:
             unpushed = unpushed[:limit]
 
+        echo(f"Messages in storage: {total_count:,}")
+        echo(f"Already pushed to destination: {already_pushed_count:,}")
         echo(f"To push: {len(unpushed):,}")
         echo()
 
@@ -683,7 +885,12 @@ def push(
             echo("Nothing to push.")
             return
 
-        client = get_imap_client(dst_type)
+        # Create IMAP client
+        if use_v2 and isinstance(acct, AccountConfig) and acct.host:
+            client = IMAPClient(acct.host, acct.port)
+        else:
+            client = get_imap_client(dst_type)
+
         if not dry_run:
             client.connect(dst_user, dst_password)
             if hasattr(client, 'create_folder'):
@@ -694,7 +901,7 @@ def push(
         skipped = 0
         consecutive_errors = 0
         aborted = False
-        errors = []  # collect errors for reporting
+        errors = []
         total = len(unpushed)
         max_size_bytes = max_size * 1024 * 1024
         console = Console()
@@ -755,9 +962,12 @@ def push(
                             msg.raw,
                         )
                         if success[0] == "OK":
-                            storage.mark_pushed(msg.message_id, dst_type, dst_user, dst_folder)
+                            if use_v2:
+                                mark_pushed(account, msg.message_id, root)
+                            else:
+                                storage.mark_pushed(msg.message_id, dst_type, dst_user, dst_folder)
                             pushed += 1
-                            consecutive_errors = 0  # reset on success
+                            consecutive_errors = 0
                             if verbose:
                                 print_result("ok", subj)
                         else:
@@ -804,7 +1014,11 @@ def push(
                         subj = (msg.subject or "(no subject)")[:40]
                         echo(f"  {subj}: {error}")
 
-        storage.disconnect()
+        # Cleanup
+        if use_v2 and hasattr(layout, 'disconnect'):
+            layout.disconnect()
+        elif not use_v2:
+            storage.disconnect()
 
     except Exception as e:
         err(f"Error: {e}")
