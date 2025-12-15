@@ -2,13 +2,22 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
 
 import yaml
 
-LayoutType = Literal[
-    "tree:flat", "tree:year", "tree:month", "tree:day", "tree:hash2", "sqlite"
-]
+from .layouts.path_template import PRESETS, LEGACY_PRESETS, resolve_preset
+
+
+def is_valid_layout(layout: str) -> bool:
+    """Check if a layout string is valid (preset name or template)."""
+    # Preset names
+    if layout in PRESETS or layout in LEGACY_PRESETS:
+        return True
+    # "sqlite" is special
+    if layout == "sqlite":
+        return True
+    # Otherwise must be a template (contain $)
+    return "$" in layout
 
 EML_DIR = ".eml"
 CONFIG_FILE = "config.yaml"
@@ -30,7 +39,7 @@ class AccountConfig:
 @dataclass
 class EmlConfig:
     """Top-level eml project configuration."""
-    layout: LayoutType = "tree:month"
+    layout: str = "default"  # Preset name or template string
     accounts: dict[str, AccountConfig] = field(default_factory=dict)
 
 
@@ -88,7 +97,7 @@ def load_config(root: Path | None = None) -> EmlConfig:
         )
 
     return EmlConfig(
-        layout=data.get("layout", "tree:month"),
+        layout=data.get("layout", "default"),
         accounts=accounts,
     )
 

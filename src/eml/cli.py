@@ -25,22 +25,25 @@ from .storage import (
     find_eml_dir, get_eml_dir, get_msgs_db_path, get_account,
 )
 from .config import (
-    EmlConfig, AccountConfig, LayoutType, PullFailure,
+    EmlConfig, AccountConfig, PullFailure, is_valid_layout,
     find_eml_root, get_eml_root, load_config, save_config,
     get_folder_sync_state, set_folder_sync_state,
     load_pushed, mark_pushed, is_pushed,
     load_failures, save_failures, add_failure, clear_failure, clear_failures,
     get_failures_path,
 )
-from .layouts import StorageLayout, StoredMessage, TreeLayout, SqliteLayout
+from .layouts import (
+    StorageLayout, StoredMessage, TreeLayout, SqliteLayout,
+    PRESETS, LEGACY_PRESETS, resolve_preset,
+)
 
 
 def err(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
 
 
-def is_v2_project(root: Path | None = None) -> bool:
-    """Check if this is a V2 project (has config.yaml)."""
+def has_config(root: Path | None = None) -> bool:
+    """Check if project has config.yaml."""
     root = root or find_eml_root()
     if not root:
         return False
@@ -57,19 +60,18 @@ def get_storage_layout(root: Path | None = None) -> StorageLayout:
         layout.connect()
         return layout
     else:
-        # Parse tree:X format
-        scheme = config.layout.split(":")[1] if ":" in config.layout else "month"
-        return TreeLayout(root, sharding=scheme)
+        # Use template-based TreeLayout
+        return TreeLayout(root, template=config.layout)
 
 
 def get_account_any(name: str) -> Account | AccountConfig | None:
-    """Get account by name, checking V2 config.yaml first, then V1 accts.db."""
+    """Get account by name from config.yaml or global accts.db."""
     root = find_eml_root()
-    if root and is_v2_project(root):
+    if root and has_config(root):
         config = load_config(root)
         if name in config.accounts:
             return config.accounts[name]
-    # Fall back to V1
+    # Fall back to global
     return get_account(name)
 
 
@@ -199,21 +201,41 @@ def main():
 # init
 # ============================================================================
 
-LAYOUT_CHOICES = ["tree:flat", "tree:year", "tree:month", "tree:day", "tree:hash2", "sqlite"]
+def validate_layout(ctx, param, value):
+    """Validate layout is a preset name or valid template."""
+    if not is_valid_layout(value):
+        raise click.BadParameter(
+            f"Invalid layout. Use a preset ({', '.join(PRESETS.keys())}, sqlite) "
+            "or a template containing $variables"
+        )
+    return value
 
 
 @main.command()
 @option('-g', '--global', 'use_global', is_flag=True, help="Initialize global config (~/.config/eml)")
-@option('-L', '--layout', type=click.Choice(LAYOUT_CHOICES), default="tree:month", help="Storage layout")
-@option('-V', '--v1', is_flag=True, help="Use V1 SQLite-only format (deprecated)")
-def init(use_global: bool, layout: str, v1: bool):
+@option('-L', '--layout', default="default", callback=validate_layout,
+        help="Layout preset (default, flat, daily, compact, hash2, sqlite) or template")
+def init(use_global: bool, layout: str):
     """Initialize eml project directory.
 
     \b
+    Layout presets:
+      default  $folder/$yyyy/$mm/${sha8}_${subj}.eml
+      flat     $folder/${sha8}_${subj}.eml
+      daily    $folder/$yyyy/$mm/$dd/${sha8}_${subj}.eml
+      compact  $folder/$yyyy$mm$dd_${sha8}.eml
+      hash2    $folder/${sha2}/${sha8}_${subj}.eml
+      sqlite   Store messages in .eml/msgs.db
+
+    \b
+    Or use a custom template:
+      eml init -L '$folder/$yyyy/$mm/${sha8}_${subj20}.eml'
+
+    \b
     Examples:
-      eml init                       # Create .eml/ with tree:month layout
-      eml init -L sqlite             # Use SQLite blob storage
-      eml init -L tree:flat          # Flat directory structure
+      eml init                       # Default layout
+      eml init -L flat               # Flat directory structure
+      eml init -L sqlite             # SQLite blob storage
       eml init -g                    # Create ~/.config/eml/ for global accounts
     """
     if use_global:
@@ -225,33 +247,13 @@ def init(use_global: bool, layout: str, v1: bool):
         echo(f"Initialized global config: {target}")
         return
 
-    if v1:
-        # Legacy V1 initialization
-        eml_dir = Path.cwd() / EML_DIR
-        if eml_dir.exists():
-            echo(f"Already initialized: {eml_dir}")
-            return
-        eml_dir.mkdir(parents=True)
-        with MessageStorage(eml_dir / MSGS_DB) as storage:
-            pass
-        with AccountStorage(eml_dir / ACCTS_DB) as storage:
-            pass
-        echo(f"Initialized (V1): {eml_dir}")
-        echo(f"  {MSGS_DB}   - message storage")
-        echo(f"  {ACCTS_DB}  - account credentials")
-        echo()
-        echo("Next steps:")
-        echo("  eml account add gmail user@gmail.com")
-        echo("  eml pull gmail -f INBOX")
-        return
-
-    # V2 initialization
+    # Initialize project
     root = Path.cwd()
     eml_dir = root / EML_DIR
     config_path = eml_dir / "config.yaml"
 
     if config_path.exists():
-        echo(f"Already initialized (V2): {eml_dir}")
+        echo(f"Already initialized: {eml_dir}")
         return
 
     # Create .eml directory structure
@@ -275,8 +277,13 @@ def init(use_global: bool, layout: str, v1: bool):
         subprocess.run(["git", "init"], cwd=root, capture_output=True)
         echo("Initialized git repository")
 
-    echo(f"Initialized (V2): {eml_dir}")
-    echo(f"  config.yaml   - accounts and layout ({layout})")
+    # Show resolved template if using a preset
+    resolved = resolve_preset(layout)
+    layout_display = f"{layout}" if layout == resolved else f"{layout} → {resolved}"
+
+    echo(f"Initialized: {eml_dir}")
+    echo(f"  config.yaml   - accounts and layout")
+    echo(f"  Layout: {layout_display}")
     echo(f"  sync-state/   - pull progress per account")
     echo(f"  pushed/       - push manifests per account")
     echo()
@@ -350,8 +357,8 @@ def account_add(
 
     # Check for V2 project
     root = find_eml_root()
-    if root and is_v2_project(root):
-        # V2: store in config.yaml
+    if root and has_config(root):
+        #  store in config.yaml
         config = load_config(root)
         config.accounts[name] = AccountConfig(
             name=name,
@@ -364,7 +371,7 @@ def account_add(
         save_config(config, root)
         echo(f"Account '{name}' saved ({acct_type}: {user}) [config.yaml]")
     else:
-        # V1: store in accts.db
+        # Legacy:  store in accts.db
         eml_dir = find_eml_dir()
         if not eml_dir:
             err("Not in an eml project. Run 'eml init' first, or use -g for global.")
@@ -391,7 +398,7 @@ def account_ls(show_all: bool, use_global: bool):
 
     # V2 local accounts (config.yaml)
     root = find_eml_root()
-    if not use_global and root and is_v2_project(root):
+    if not use_global and root and has_config(root):
         config = load_config(root)
         if config.accounts:
             accounts_found = True
@@ -404,7 +411,7 @@ def account_ls(show_all: bool, use_global: bool):
 
     # V1 local accounts (accts.db)
     eml_dir = find_eml_dir()
-    if not use_global and eml_dir and not is_v2_project():
+    if not use_global and eml_dir and not has_config():
         local_accts_path = eml_dir / ACCTS_DB
         if local_accts_path.exists():
             with AccountStorage(local_accts_path) as storage:
@@ -460,7 +467,7 @@ def account_rm(use_global: bool, name: str):
 
     # Check for V2 project
     root = find_eml_root()
-    if root and is_v2_project(root):
+    if root and has_config(root):
         config = load_config(root)
         if name in config.accounts:
             del config.accounts[name]
@@ -471,7 +478,7 @@ def account_rm(use_global: bool, name: str):
             sys.exit(1)
         return
 
-    # V1: remove from accts.db
+    # Legacy:  remove from accts.db
     eml_dir = find_eml_dir()
     if not eml_dir:
         err("Not in an eml project. Run 'eml init' first, or use -g for global.")
@@ -518,7 +525,7 @@ def account_rename(use_global: bool, old_name: str, new_name: str):
 
     # Check for V2 project
     root = find_eml_root()
-    if root and is_v2_project(root):
+    if root and has_config(root):
         config = load_config(root)
         if old_name not in config.accounts:
             err(f"Account '{old_name}' not found.")
@@ -533,7 +540,7 @@ def account_rename(use_global: bool, old_name: str, new_name: str):
         echo(f"Account renamed: '{old_name}' → '{new_name}' [config.yaml]")
         return
 
-    # V1: rename in accts.db
+    # Legacy:  rename in accts.db
     eml_dir = find_eml_dir()
     if not eml_dir:
         err("Not in an eml project. Run 'eml init' first, or use -g for global.")
@@ -679,12 +686,12 @@ def pull(
     src_user = user or acct.user
     src_password = password or acct.password
 
-    # Determine if V2 project
+    # Check for config
     root = find_eml_root()
-    use_v2 = root and is_v2_project(root)
+    has_cfg = root and has_config(root)
 
     # Create IMAP client
-    if use_v2 and isinstance(acct, AccountConfig) and acct.host:
+    if has_cfg and isinstance(acct, AccountConfig) and acct.host:
         client = IMAPClient(acct.host, acct.port)
     else:
         client = get_imap_client(src_type)
@@ -692,7 +699,7 @@ def pull(
 
     echo(f"Source: {src_type} ({src_user})")
     echo(f"Folder: {src_folder}")
-    if use_v2:
+    if has_cfg:
         echo(f"Layout: {load_config(root).layout}")
     if dry_run:
         echo(style("DRY RUN - no changes will be made", fg="yellow"))
@@ -704,7 +711,7 @@ def pull(
         echo(f"Folder has {count:,} messages (UIDVALIDITY: {uidvalidity})")
 
         # Open storage (V1 vs V2)
-        if use_v2:
+        if has_cfg:
             layout = get_storage_layout(root) if not dry_run else None
         else:
             msgs_path = get_msgs_db_path()
@@ -715,7 +722,7 @@ def pull(
         # Check sync state (unless --full or --retry)
         stored_uidvalidity, last_uid = (None, None)
         if not dry_run and not full and not retry:
-            if use_v2:
+            if has_cfg:
                 sync_state = get_folder_sync_state(account, src_folder, root)
                 if sync_state:
                     stored_uidvalidity = sync_state.uidvalidity
@@ -727,9 +734,9 @@ def pull(
             echo(style(f"UIDVALIDITY changed ({stored_uidvalidity} → {uidvalidity}), doing full sync", fg="yellow"))
             last_uid = None
 
-        # Load previous failures for this account/folder (V2 only)
+        # Load previous failures for this account/folder 
         failures = {}
-        if use_v2 and not dry_run:
+        if has_cfg and not dry_run:
             failures = load_failures(account, src_folder, root)
 
         # Get UIDs to fetch
@@ -764,7 +771,7 @@ def pull(
 
         def save_checkpoint():
             if not dry_run and max_uid > 0:
-                if use_v2:
+                if has_cfg:
                     set_folder_sync_state(account, src_folder, uidvalidity, max_uid, root)
                 else:
                     storage.set_sync_state(src_type, src_user, src_folder, uidvalidity, max_uid)
@@ -804,7 +811,7 @@ def pull(
                     info = client.fetch_info(uid)
                 except Exception as e:
                     failed += 1
-                    if use_v2 and not dry_run:
+                    if has_cfg and not dry_run:
                         failures[uid_int] = e
                     if verbose:
                         print_result("fail", f"UID {uid}", str(e))
@@ -815,7 +822,7 @@ def pull(
 
                 # Check if already stored
                 if not dry_run:
-                    has_msg = layout.has_message(info.message_id) if use_v2 else storage.has_message(info.message_id)
+                    has_msg = layout.has_message(info.message_id) if has_cfg else storage.has_message(info.message_id)
                     if has_msg:
                         skipped += 1
                         if verbose:
@@ -833,7 +840,7 @@ def pull(
                 # Fetch full message and store
                 try:
                     raw = client.fetch_raw(uid)
-                    if use_v2:
+                    if has_cfg:
                         layout.add_message(
                             message_id=info.message_id,
                             raw=raw,
@@ -866,7 +873,7 @@ def pull(
                         print_result("ok", subj)
                 except Exception as e:
                     failed += 1
-                    if use_v2 and not dry_run:
+                    if has_cfg and not dry_run:
                         failures[uid_int] = e
                     if verbose:
                         print_result("fail", subj, str(e))
@@ -880,8 +887,8 @@ def pull(
         # Final sync state update
         save_checkpoint()
 
-        # Save failures to disk (V2 only)
-        if use_v2 and not dry_run:
+        # Save failures to disk 
+        if has_cfg and not dry_run:
             # Convert exception objects to PullFailure objects
             failure_records = {}
             for uid, exc in failures.items():
@@ -895,20 +902,20 @@ def pull(
             echo(f"Fetched: {fetched}")
             if skipped:
                 echo(f"Skipped (duplicate): {skipped}")
-            msg_count = layout.count() if use_v2 else storage.count()
+            msg_count = layout.count() if has_cfg else storage.count()
             echo(f"Total in storage: {msg_count:,}")
         if failed:
             echo(style(f"Failed: {failed}", fg="red"))
-            if use_v2 and not dry_run:
+            if has_cfg and not dry_run:
                 failures_path = get_failures_path(account, src_folder, root)
                 echo(f"  Failures logged: {failures_path}")
                 echo("  Retry with: eml pull " + account + " -f '" + src_folder + "' --retry")
 
         # Cleanup
         if not dry_run:
-            if use_v2 and hasattr(layout, 'disconnect'):
+            if has_cfg and hasattr(layout, 'disconnect'):
                 layout.disconnect()
-            elif not use_v2:
+            elif not has_cfg:
                 storage.disconnect()
 
     except Exception as e:
@@ -971,13 +978,13 @@ def push(
     dst_password = password or acct.password
     dst_folder = folder
 
-    # Determine if V2 project
+    # Check for config
     root = find_eml_root()
-    use_v2 = root and is_v2_project(root)
+    has_cfg = root and has_config(root)
 
     echo(f"Destination: {dst_type} ({dst_user})")
     echo(f"Folder: {dst_folder}")
-    if use_v2:
+    if has_cfg:
         echo(f"Layout: {load_config(root).layout}")
     if dry_run:
         echo(style("DRY RUN - no changes will be made", fg="yellow"))
@@ -985,8 +992,8 @@ def push(
 
     client = None
     try:
-        if use_v2:
-            # V2: use layout and pushed/<account>.txt
+        if has_cfg:
+            #  use layout and pushed/<account>.txt
             layout = get_storage_layout(root)
             pushed_set = load_pushed(account, root)
 
@@ -996,7 +1003,7 @@ def push(
             already_pushed_count = len(pushed_set)
             unpushed = [m for m in all_msgs if m.message_id not in pushed_set]
         else:
-            # V1: use SQL storage
+            # Legacy:  use SQL storage
             msgs_path = get_msgs_db_path()
             storage = MessageStorage(msgs_path)
             storage.connect()
@@ -1017,7 +1024,7 @@ def push(
             return
 
         # Create IMAP client
-        if use_v2 and isinstance(acct, AccountConfig) and acct.host:
+        if has_cfg and isinstance(acct, AccountConfig) and acct.host:
             client = IMAPClient(acct.host, acct.port)
         else:
             client = get_imap_client(dst_type)
@@ -1093,7 +1100,7 @@ def push(
                             msg.raw,
                         )
                         if success[0] == "OK":
-                            if use_v2:
+                            if has_cfg:
                                 mark_pushed(account, msg.message_id, root)
                             else:
                                 storage.mark_pushed(msg.message_id, dst_type, dst_user, dst_folder)
@@ -1146,9 +1153,9 @@ def push(
                         echo(f"  {subj}: {error}")
 
         # Cleanup
-        if use_v2 and hasattr(layout, 'disconnect'):
+        if has_cfg and hasattr(layout, 'disconnect'):
             layout.disconnect()
-        elif not use_v2:
+        elif not has_cfg:
             storage.disconnect()
 
     except Exception as e:
@@ -1422,20 +1429,20 @@ def stats():
 @require_init
 @option('-n', '--dry-run', is_flag=True, help="Show what would be converted")
 @option('-D', '--delete-old', is_flag=True, help="Delete old storage after conversion")
-@argument('target_layout', type=click.Choice(LAYOUT_CHOICES))
+@argument('target_layout', callback=validate_layout)
 def convert(dry_run: bool, delete_old: bool, target_layout: str):
     """Convert between storage layouts.
 
     \b
     Examples:
-      eml convert tree:month          # Convert to monthly sharding
-      eml convert tree:flat           # Flatten to single directory
+      eml convert default             # Convert to default template
+      eml convert flat                # Flatten to single directory
       eml convert sqlite              # Pack into SQLite database
-      eml convert sqlite -D           # Convert and delete old .eml files
+      eml convert '$folder/$yyyy/${sha8}.eml'  # Custom template
     """
     root = find_eml_root()
-    if not root or not is_v2_project(root):
-        err("Convert requires a V2 project. Run 'eml init' first.")
+    if not root or not has_config(root):
+        err("Convert requires an initialized project. Run 'eml init' first.")
         sys.exit(1)
 
     config = load_config(root)
@@ -1470,8 +1477,7 @@ def convert(dry_run: bool, delete_old: bool, target_layout: str):
         target = SqliteLayout(root)
         target.connect()
     else:
-        scheme = target_layout.split(":")[1] if ":" in target_layout else "month"
-        target = TreeLayout(root, sharding=scheme)
+        target = TreeLayout(root, template=target_layout)
 
     console = Console()
     converted = 0

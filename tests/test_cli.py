@@ -15,8 +15,8 @@ def runner():
 
 
 @pytest.fixture
-def v2_project(tmp_path, monkeypatch):
-    """Create a V2 project in a temp directory."""
+def project(tmp_path, monkeypatch):
+    """Create an initialized project in a temp directory."""
     monkeypatch.chdir(tmp_path)
     runner = CliRunner()
     result = runner.invoke(main, ["init"])
@@ -25,28 +25,20 @@ def v2_project(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.fixture
-def v1_project(tmp_path, monkeypatch):
-    """Create a V1 project in a temp directory."""
-    monkeypatch.chdir(tmp_path)
-    runner = CliRunner()
-    result = runner.invoke(main, ["init", "-V"])
-    assert result.exit_code == 0
-    assert (tmp_path / ".eml" / "msgs.db").exists()
-    return tmp_path
-
-
 class TestInit:
-    def test_init_v2_default(self, runner, tmp_path, monkeypatch):
+    def test_init_default(self, runner, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         result = runner.invoke(main, ["init"])
         assert result.exit_code == 0
-        assert "Initialized (V2)" in result.output
+        assert "Initialized" in result.output
         assert (tmp_path / ".eml" / "config.yaml").exists()
         assert (tmp_path / ".eml" / "sync-state").is_dir()
         assert (tmp_path / ".eml" / "pushed").is_dir()
+        # Check default layout is stored
+        config = (tmp_path / ".eml" / "config.yaml").read_text()
+        assert "layout: default" in config
 
-    def test_init_v2_sqlite(self, runner, tmp_path, monkeypatch):
+    def test_init_sqlite(self, runner, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         result = runner.invoke(main, ["init", "-L", "sqlite"])
         assert result.exit_code == 0
@@ -54,22 +46,44 @@ class TestInit:
         config = (tmp_path / ".eml" / "config.yaml").read_text()
         assert "layout: sqlite" in config
 
-    def test_init_v1(self, runner, tmp_path, monkeypatch):
+    def test_init_preset(self, runner, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        result = runner.invoke(main, ["init", "-V"])
+        result = runner.invoke(main, ["init", "-L", "flat"])
         assert result.exit_code == 0
-        assert "Initialized (V1)" in result.output
-        assert (tmp_path / ".eml" / "msgs.db").exists()
-        assert (tmp_path / ".eml" / "accts.db").exists()
+        assert "flat" in result.output
+        config = (tmp_path / ".eml" / "config.yaml").read_text()
+        assert "layout: flat" in config
 
-    def test_init_already_exists(self, runner, v2_project):
+    def test_init_custom_template(self, runner, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        template = "$folder/$yyyy/${sha8}.eml"
+        result = runner.invoke(main, ["init", "-L", template])
+        assert result.exit_code == 0
+        config = (tmp_path / ".eml" / "config.yaml").read_text()
+        assert template in config
+
+    def test_init_legacy_layout(self, runner, tmp_path, monkeypatch):
+        """Legacy tree:* layouts should still work."""
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(main, ["init", "-L", "tree:month"])
+        assert result.exit_code == 0
+        config = (tmp_path / ".eml" / "config.yaml").read_text()
+        assert "tree:month" in config
+
+    def test_init_invalid_layout(self, runner, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(main, ["init", "-L", "invalid"])
+        assert result.exit_code != 0
+        assert "Invalid layout" in result.output
+
+    def test_init_already_exists(self, runner, project):
         result = runner.invoke(main, ["init"])
         assert result.exit_code == 0
         assert "Already initialized" in result.output
 
 
 class TestAccount:
-    def test_account_add_v2(self, runner, v2_project):
+    def test_account_add(self, runner, project):
         result = runner.invoke(
             main,
             ["account", "add", "-t", "gmail", "g/test", "test@gmail.com"],
@@ -80,26 +94,26 @@ class TestAccount:
         assert "config.yaml" in result.output
 
         # Verify in config
-        config = (v2_project / ".eml" / "config.yaml").read_text()
+        config = (project / ".eml" / "config.yaml").read_text()
         assert "g/test" in config
         assert "test@gmail.com" in config
 
-    def test_account_add_with_host(self, runner, v2_project):
+    def test_account_add_with_host(self, runner, project):
         result = runner.invoke(
             main,
             ["account", "add", "-t", "imap", "-H", "imap.example.com", "y/test", "user@example.com"],
             input="testpass\n",
         )
         assert result.exit_code == 0
-        config = (v2_project / ".eml" / "config.yaml").read_text()
+        config = (project / ".eml" / "config.yaml").read_text()
         assert "imap.example.com" in config
 
-    def test_account_ls_empty(self, runner, v2_project):
+    def test_account_ls_empty(self, runner, project):
         result = runner.invoke(main, ["account", "ls"])
         assert result.exit_code == 0
         assert "No accounts configured" in result.output
 
-    def test_account_ls_with_accounts(self, runner, v2_project):
+    def test_account_ls_with_accounts(self, runner, project):
         # Add an account first
         runner.invoke(
             main,
@@ -111,7 +125,7 @@ class TestAccount:
         assert "g/test" in result.output
         assert "test@gmail.com" in result.output
 
-    def test_account_rm(self, runner, v2_project):
+    def test_account_rm(self, runner, project):
         # Add then remove
         runner.invoke(
             main,
@@ -126,12 +140,12 @@ class TestAccount:
         result = runner.invoke(main, ["account", "ls"])
         assert "g/test" not in result.output
 
-    def test_account_rm_not_found(self, runner, v2_project):
+    def test_account_rm_not_found(self, runner, project):
         result = runner.invoke(main, ["account", "rm", "nonexistent"])
         assert result.exit_code == 1
         assert "not found" in result.output
 
-    def test_account_rename(self, runner, v2_project):
+    def test_account_rename(self, runner, project):
         # Add an account
         runner.invoke(
             main,
@@ -150,12 +164,12 @@ class TestAccount:
         assert "g/old" not in result.output
         assert "g/new" in result.output
 
-    def test_account_rename_not_found(self, runner, v2_project):
+    def test_account_rename_not_found(self, runner, project):
         result = runner.invoke(main, ["account", "rename", "nonexistent", "new"])
         assert result.exit_code == 1
         assert "not found" in result.output
 
-    def test_account_rename_target_exists(self, runner, v2_project):
+    def test_account_rename_target_exists(self, runner, project):
         # Add two accounts
         runner.invoke(
             main,
@@ -176,54 +190,60 @@ class TestAccount:
 class TestHelpOnNoArgs:
     """Test that commands show help when required args are missing."""
 
-    def test_account_add_no_args(self, runner, v2_project):
+    def test_account_add_no_args(self, runner, project):
         result = runner.invoke(main, ["account", "add"])
         assert result.exit_code == 2
         assert "Usage:" in result.output
         assert "NAME USER" in result.output
 
-    def test_account_rm_no_args(self, runner, v2_project):
+    def test_account_rm_no_args(self, runner, project):
         result = runner.invoke(main, ["account", "rm"])
         assert result.exit_code == 2
         assert "Usage:" in result.output
 
-    def test_account_rename_no_args(self, runner, v2_project):
+    def test_account_rename_no_args(self, runner, project):
         result = runner.invoke(main, ["account", "rename"])
         assert result.exit_code == 2
         assert "Usage:" in result.output
 
-    def test_pull_no_args(self, runner, v2_project):
+    def test_pull_no_args(self, runner, project):
         result = runner.invoke(main, ["pull"])
         assert result.exit_code == 2
         assert "Usage:" in result.output
         assert "ACCOUNT" in result.output
 
-    def test_push_no_args(self, runner, v2_project):
+    def test_push_no_args(self, runner, project):
         result = runner.invoke(main, ["push"])
         assert result.exit_code == 2
         assert "Usage:" in result.output
 
-    def test_convert_no_args(self, runner, v2_project):
+    def test_convert_no_args(self, runner, project):
         result = runner.invoke(main, ["convert"])
         assert result.exit_code == 2
         assert "Usage:" in result.output
 
-    def test_folders_no_args(self, runner, v2_project):
+    def test_folders_no_args(self, runner, project):
         result = runner.invoke(main, ["folders"])
         assert result.exit_code == 2
         assert "Usage:" in result.output
 
 
 class TestConvert:
-    def test_convert_same_layout(self, runner, v2_project):
-        result = runner.invoke(main, ["convert", "tree:month"])
+    def test_convert_same_layout(self, runner, project):
+        # Default layout is "default", so converting to "default" should be no-op
+        result = runner.invoke(main, ["convert", "default"])
         assert result.exit_code == 0
         assert "Already using" in result.output
 
-    def test_convert_dry_run(self, runner, v2_project):
+    def test_convert_dry_run(self, runner, project):
         result = runner.invoke(main, ["convert", "-n", "sqlite"])
         assert result.exit_code == 0
         assert "DRY RUN" in result.output
+
+    def test_convert_legacy_alias(self, runner, project):
+        # Legacy tree:month should work and resolve to default template
+        result = runner.invoke(main, ["convert", "-n", "tree:month"])
+        assert result.exit_code == 0
 
 
 class TestAliases:
@@ -235,11 +255,11 @@ class TestAliases:
         assert result.exit_code == 0
         assert "Initialized" in result.output
 
-    def test_account_alias(self, runner, v2_project):
+    def test_account_alias(self, runner, project):
         result = runner.invoke(main, ["a", "l"])
         assert result.exit_code == 0
 
-    def test_account_add_alias(self, runner, v2_project):
+    def test_account_add_alias(self, runner, project):
         result = runner.invoke(
             main,
             ["a", "a", "-t", "gmail", "g/test", "test@gmail.com"],
@@ -248,7 +268,7 @@ class TestAliases:
         assert result.exit_code == 0
         assert "saved" in result.output
 
-    def test_account_rename_alias(self, runner, v2_project):
+    def test_account_rename_alias(self, runner, project):
         runner.invoke(
             main,
             ["a", "a", "-t", "gmail", "g/old", "test@gmail.com"],
@@ -258,6 +278,6 @@ class TestAliases:
         assert result.exit_code == 0
         assert "renamed" in result.output
 
-    def test_convert_alias(self, runner, v2_project):
+    def test_convert_alias(self, runner, project):
         result = runner.invoke(main, ["cv", "tree:month"])
         assert result.exit_code == 0
