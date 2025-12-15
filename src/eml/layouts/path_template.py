@@ -10,9 +10,10 @@ from typing import Any
 
 # Preset templates - simple names that expand to full templates
 PRESETS: dict[str, str] = {
-    # New defaults (content hash + subject for robustness)
-    "default": "$folder/$yyyy/$mm/${sha8}_${subj}.eml",
+    # Default: daily dirs with timestamp, hash, and subject for chronological ordering
+    "default": "$folder/$yyyy/$mm/$dd/${hhmmss}_${sha8}_${subj}.eml",
     "flat": "$folder/${sha8}_${subj}.eml",
+    "monthly": "$folder/$yyyy/$mm/${sha8}_${subj}.eml",
     "daily": "$folder/$yyyy/$mm/$dd/${sha8}_${subj}.eml",
     "compact": "$folder/$yyyy$mm$dd_${sha8}.eml",
     "hash2": "$folder/${sha2}/${sha8}_${subj}.eml",
@@ -24,7 +25,7 @@ PRESETS: dict[str, str] = {
 LEGACY_PRESETS: dict[str, str] = {
     "tree:flat": "flat",
     "tree:year": "$folder/$yyyy/${sha8}_${subj}.eml",
-    "tree:month": "default",
+    "tree:month": "monthly",
     "tree:day": "daily",
     "tree:hash2": "hash2",
 }

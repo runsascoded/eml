@@ -220,7 +220,8 @@ def init(use_global: bool, layout: str):
 
     \b
     Layout presets:
-      default  $folder/$yyyy/$mm/${sha8}_${subj}.eml
+      default  $folder/$yyyy/$mm/$dd/${hhmmss}_${sha8}_${subj}.eml
+      monthly  $folder/$yyyy/$mm/${sha8}_${subj}.eml
       flat     $folder/${sha8}_${subj}.eml
       daily    $folder/$yyyy/$mm/$dd/${sha8}_${subj}.eml
       compact  $folder/$yyyy$mm$dd_${sha8}.eml
@@ -229,7 +230,7 @@ def init(use_global: bool, layout: str):
 
     \b
     Or use a custom template:
-      eml init -L '$folder/$yyyy/$mm/${sha8}_${subj20}.eml'
+      eml init -L '$folder/$yyyy/$mm/$dd/${hhmmss}_${sha8}_${subj20}.eml'
 
     \b
     Examples:
