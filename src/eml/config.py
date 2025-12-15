@@ -254,3 +254,116 @@ def is_pushed(
     """Check if a message has been pushed to account."""
     pushed = load_pushed(account, root)
     return message_id in pushed
+
+
+# --- Failure Tracking ---
+
+FAILURES_DIR = "failures"
+
+
+@dataclass
+class PullFailure:
+    """A failed pull attempt for a specific UID."""
+    uid: int
+    error: str
+    timestamp: str | None = None
+
+
+def get_failures_path(account: str, folder: str, root: Path | None = None) -> Path:
+    """Get path to failures file for an account/folder."""
+    root = root or get_eml_root()
+    safe_account = account.replace("/", "_")
+    safe_folder = folder.replace("/", "_")
+    return root / EML_DIR / FAILURES_DIR / f"{safe_account}_{safe_folder}.yaml"
+
+
+def load_failures(
+    account: str,
+    folder: str,
+    root: Path | None = None,
+) -> dict[int, PullFailure]:
+    """Load failures for an account/folder. Returns {uid: PullFailure}."""
+    path = get_failures_path(account, folder, root)
+    if not path.exists():
+        return {}
+
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+
+    failures = {}
+    for uid, info in data.items():
+        if isinstance(info, dict):
+            failures[int(uid)] = PullFailure(
+                uid=int(uid),
+                error=info.get("error", ""),
+                timestamp=info.get("timestamp"),
+            )
+        else:
+            failures[int(uid)] = PullFailure(uid=int(uid), error=str(info))
+    return failures
+
+
+def save_failures(
+    account: str,
+    folder: str,
+    failures: dict[int, PullFailure],
+    root: Path | None = None,
+) -> None:
+    """Save failures for an account/folder."""
+    path = get_failures_path(account, folder, root)
+
+    if not failures:
+        if path.exists():
+            path.unlink()
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {}
+    for uid, failure in sorted(failures.items()):
+        data[uid] = {"error": failure.error}
+        if failure.timestamp:
+            data[uid]["timestamp"] = failure.timestamp
+    with open(path, "w") as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+
+def add_failure(
+    account: str,
+    folder: str,
+    uid: int,
+    error: str,
+    root: Path | None = None,
+) -> None:
+    """Record a pull failure for a specific UID."""
+    from datetime import datetime
+    failures = load_failures(account, folder, root)
+    failures[uid] = PullFailure(
+        uid=uid,
+        error=error,
+        timestamp=datetime.now().isoformat(),
+    )
+    save_failures(account, folder, failures, root)
+
+
+def clear_failure(
+    account: str,
+    folder: str,
+    uid: int,
+    root: Path | None = None,
+) -> None:
+    """Remove a failure record (e.g., after successful retry)."""
+    failures = load_failures(account, folder, root)
+    if uid in failures:
+        del failures[uid]
+        save_failures(account, folder, failures, root)
+
+
+def clear_failures(
+    account: str,
+    folder: str,
+    root: Path | None = None,
+) -> None:
+    """Clear all failures for an account/folder."""
+    path = get_failures_path(account, folder, root)
+    if path.exists():
+        path.unlink()

@@ -25,10 +25,12 @@ from .storage import (
     find_eml_dir, get_eml_dir, get_msgs_db_path, get_account,
 )
 from .config import (
-    EmlConfig, AccountConfig, LayoutType,
+    EmlConfig, AccountConfig, LayoutType, PullFailure,
     find_eml_root, get_eml_root, load_config, save_config,
     get_folder_sync_state, set_folder_sync_state,
     load_pushed, mark_pushed, is_pushed,
+    load_failures, save_failures, add_failure, clear_failure, clear_failures,
+    get_failures_path,
 )
 from .layouts import StorageLayout, StoredMessage, TreeLayout, SqliteLayout
 
@@ -636,9 +638,11 @@ def folders(password: str | None, size: bool, user: str | None, account_or_folde
 @require_init
 @option('-b', '--batch', 'checkpoint_interval', default=100, help="Save progress every N messages")
 @option('-f', '--folder', type=str, help="Source folder")
+@option('-F', '--full', is_flag=True, help="Ignore sync-state, fetch all messages")
 @option('-l', '--limit', type=int, help="Max emails to fetch")
 @option('-n', '--dry-run', is_flag=True, help="Show what would be fetched")
 @option('-p', '--password', help="IMAP password (overrides account)")
+@option('-r', '--retry', is_flag=True, help="Retry previously failed UIDs only")
 @tag_option
 @option('-u', '--user', help="IMAP username (overrides account)")
 @option('-v', '--verbose', is_flag=True, help="Show each message")
@@ -646,9 +650,11 @@ def folders(password: str | None, size: bool, user: str | None, account_or_folde
 def pull(
     checkpoint_interval: int,
     folder: str | None,
+    full: bool,
     limit: int | None,
     dry_run: bool,
     password: str | None,
+    retry: bool,
     tag: str | None,
     user: str | None,
     verbose: bool,
@@ -706,9 +712,9 @@ def pull(
             if not dry_run:
                 storage.connect()
 
-        # Check sync state
+        # Check sync state (unless --full or --retry)
         stored_uidvalidity, last_uid = (None, None)
-        if not dry_run:
+        if not dry_run and not full and not retry:
             if use_v2:
                 sync_state = get_folder_sync_state(account, src_folder, root)
                 if sync_state:
@@ -721,8 +727,22 @@ def pull(
             echo(style(f"UIDVALIDITY changed ({stored_uidvalidity} → {uidvalidity}), doing full sync", fg="yellow"))
             last_uid = None
 
+        # Load previous failures for this account/folder (V2 only)
+        failures = {}
+        if use_v2 and not dry_run:
+            failures = load_failures(account, src_folder, root)
+
         # Get UIDs to fetch
-        if last_uid:
+        if retry:
+            if not failures:
+                echo(style("No failures to retry", fg="yellow"))
+                return
+            uids = sorted(failures.keys())
+            echo(f"Retrying {len(uids)} failed UIDs")
+        elif full:
+            echo("Full sync (--full)")
+            uids = client.search("ALL")
+        elif last_uid:
             echo(f"Incremental sync from UID {last_uid}")
             uids = client.search_uids_after(last_uid)
         else:
@@ -784,6 +804,8 @@ def pull(
                     info = client.fetch_info(uid)
                 except Exception as e:
                     failed += 1
+                    if use_v2 and not dry_run:
+                        failures[uid_int] = e
                     if verbose:
                         print_result("fail", f"UID {uid}", str(e))
                     progress.advance(task)
@@ -823,6 +845,9 @@ def pull(
                             subject=info.subject,
                             source_uid=str(uid_int),
                         )
+                        # Clear from failures if previously failed
+                        if uid_int in failures:
+                            del failures[uid_int]
                     else:
                         storage.add_message(
                             message_id=info.message_id,
@@ -841,6 +866,8 @@ def pull(
                         print_result("ok", subj)
                 except Exception as e:
                     failed += 1
+                    if use_v2 and not dry_run:
+                        failures[uid_int] = e
                     if verbose:
                         print_result("fail", subj, str(e))
 
@@ -853,6 +880,14 @@ def pull(
         # Final sync state update
         save_checkpoint()
 
+        # Save failures to disk (V2 only)
+        if use_v2 and not dry_run:
+            # Convert exception objects to PullFailure objects
+            failure_records = {}
+            for uid, exc in failures.items():
+                failure_records[uid] = PullFailure(uid=uid, error=str(exc))
+            save_failures(account, src_folder, failure_records, root)
+
         echo()
         if dry_run:
             echo(f"Would fetch: {fetched}")
@@ -864,6 +899,10 @@ def pull(
             echo(f"Total in storage: {msg_count:,}")
         if failed:
             echo(style(f"Failed: {failed}", fg="red"))
+            if use_v2 and not dry_run:
+                failures_path = get_failures_path(account, src_folder, root)
+                echo(f"  Failures logged: {failures_path}")
+                echo("  Retry with: eml pull " + account + " -f '" + src_folder + "' --retry")
 
         # Cleanup
         if not dry_run:
