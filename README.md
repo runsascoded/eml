@@ -143,6 +143,14 @@ eml ls "search term"            # search From/Subject
 eml stats                       # size distribution, date range, etc.
 ```
 
+### `eml status`
+
+```bash
+eml status                      # show pull progress/activity
+eml status -f INBOX             # filter to folder
+watch -c -n5 eml status -c      # monitor with colors
+```
+
 ### `eml serve` (`s`)
 
 ```bash

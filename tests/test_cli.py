@@ -281,3 +281,52 @@ class TestAliases:
     def test_convert_alias(self, runner, project):
         result = runner.invoke(main, ["cv", "tree:month"])
         assert result.exit_code == 0
+
+
+class TestStatus:
+    """Tests for eml status command."""
+
+    def test_status_empty_project(self, runner, project):
+        """Status should work on empty project."""
+        result = runner.invoke(main, ["status"])
+        assert result.exit_code == 0
+        assert "Total files:" in result.output
+        assert "0" in result.output
+        assert "No pull running" in result.output
+
+    def test_status_with_files(self, runner, project):
+        """Status should count .eml files."""
+        # Create some fake .eml files
+        inbox = project / "INBOX"
+        inbox.mkdir()
+        (inbox / "test1.eml").write_text("From: a@b.com\n\nBody")
+        (inbox / "test2.eml").write_text("From: c@d.com\n\nBody")
+
+        result = runner.invoke(main, ["status"])
+        assert result.exit_code == 0
+        assert "Total files:" in result.output
+        # Should find 2 files
+        assert "2" in result.output
+
+    def test_status_folder_filter(self, runner, project):
+        """Status -f should filter by folder."""
+        # Create files in two folders
+        inbox = project / "INBOX"
+        sent = project / "Sent"
+        inbox.mkdir()
+        sent.mkdir()
+        (inbox / "msg1.eml").write_text("test")
+        (inbox / "msg2.eml").write_text("test")
+        (sent / "msg3.eml").write_text("test")
+
+        # Filter to INBOX only
+        result = runner.invoke(main, ["status", "-f", "INBOX"])
+        assert result.exit_code == 0
+        assert "(INBOX)" in result.output
+
+    def test_status_requires_init(self, runner, tmp_path, monkeypatch):
+        """Status should fail without .eml/ directory."""
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(main, ["status"])
+        assert result.exit_code == 1
+        assert "Not an eml project" in result.output or "eml init" in result.output
