@@ -745,7 +745,8 @@ def pull(
             if not failures:
                 echo(style("No failures to retry", fg="yellow"))
                 return
-            uids = sorted(failures.keys())
+            # Convert int UIDs to bytes (as returned by IMAP search)
+            uids = [str(uid).encode() for uid in sorted(failures.keys())]
             echo(f"Retrying {len(uids)} failed UIDs")
         elif full:
             echo("Full sync (--full)")
@@ -821,8 +822,9 @@ def pull(
 
                 subj = (info.subject or "(no subject)")[:60]
 
-                # Check if already stored
-                if not dry_run:
+                # Check if already stored (by Message-ID if present)
+                # Skip this check for empty Message-ID - will check content hash after fetch
+                if not dry_run and info.message_id:
                     has_msg = layout.has_message(info.message_id) if has_cfg else storage.has_message(info.message_id)
                     if has_msg:
                         skipped += 1
@@ -841,6 +843,15 @@ def pull(
                 # Fetch full message and store
                 try:
                     raw = client.fetch_raw(uid)
+
+                    # Content-hash dedup (catches messages without Message-ID)
+                    if has_cfg and layout.has_content(raw):
+                        skipped += 1
+                        if verbose:
+                            print_result("skip", subj)
+                        progress.advance(task)
+                        continue
+
                     if has_cfg:
                         layout.add_message(
                             message_id=info.message_id,
