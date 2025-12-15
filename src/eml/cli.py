@@ -645,6 +645,7 @@ def folders(password: str | None, size: bool, user: str | None, account_or_folde
 @main.command(no_args_is_help=True)
 @require_init
 @option('-b', '--batch', 'checkpoint_interval', default=100, help="Save progress every N messages")
+@option('-e', '--max-errors', default=10, help="Abort after N consecutive errors (rate limit detection)")
 @option('-f', '--folder', type=str, help="Source folder")
 @option('-F', '--full', is_flag=True, help="Ignore sync-state, fetch all messages")
 @option('-l', '--limit', type=int, help="Max emails to fetch")
@@ -657,6 +658,7 @@ def folders(password: str | None, size: bool, user: str | None, account_or_folde
 @argument('account')
 def pull(
     checkpoint_interval: int,
+    max_errors: int,
     folder: str | None,
     full: bool,
     limit: int | None,
@@ -767,6 +769,8 @@ def pull(
         fetched = 0
         skipped = 0
         failed = 0
+        consecutive_errors = 0
+        aborted = False
         max_uid = last_uid or 0
         total = len(uids)
         console = Console()
@@ -813,11 +817,17 @@ def pull(
                     info = client.fetch_info(uid)
                 except Exception as e:
                     failed += 1
+                    consecutive_errors += 1
                     if has_cfg and not dry_run:
                         failures[uid_int] = e
                     if verbose:
                         print_result("fail", f"UID {uid}", str(e))
                     progress.advance(task)
+                    # Check for rate limit (consecutive errors)
+                    if consecutive_errors >= max_errors:
+                        console.print(f"\n[bold red]Aborting: {consecutive_errors} consecutive errors (likely rate limited)[/]")
+                        aborted = True
+                        break
                     continue
 
                 subj = (info.subject or "(no subject)")[:60]
@@ -881,16 +891,24 @@ def pull(
                             tags=[tag] if tag else None,
                         )
                     fetched += 1
+                    consecutive_errors = 0  # Reset on success
                     if verbose:
                         print_result("ok", subj)
                 except Exception as e:
                     failed += 1
+                    consecutive_errors += 1
                     if has_cfg and not dry_run:
                         failures[uid_int] = e
                     if verbose:
                         print_result("fail", subj, str(e))
 
                 progress.advance(task)
+
+                # Check for rate limit (consecutive errors)
+                if consecutive_errors >= max_errors:
+                    console.print(f"\n[bold red]Aborting: {consecutive_errors} consecutive errors (likely rate limited)[/]")
+                    aborted = True
+                    break
 
                 # Save checkpoint periodically
                 if (i + 1) % checkpoint_interval == 0:
@@ -922,6 +940,8 @@ def pull(
                 failures_path = get_failures_path(account, src_folder, root)
                 echo(f"  Failures logged: {failures_path}")
                 echo("  Retry with: eml pull " + account + " -f '" + src_folder + "' --retry")
+        if aborted:
+            echo(style("Note: Aborted early due to rate limiting. Retry later.", fg="yellow"))
 
         # Cleanup
         if not dry_run:
