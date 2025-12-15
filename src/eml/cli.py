@@ -1,11 +1,13 @@
 """CLI for email migration."""
 
+import atexit
 import imaplib
+import json
 import os
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
 
@@ -48,6 +50,76 @@ def has_config(root: Path | None = None) -> bool:
     if not root:
         return False
     return (root / ".eml" / "config.yaml").exists()
+
+
+# Pull status file helpers - for tracking active pulls in this worktree
+PULL_STATUS_FILE = "pull-status.json"
+
+def get_pull_status_path(root: Path | None = None) -> Path:
+    """Get path to pull status file."""
+    root = root or get_eml_root()
+    return root / ".eml" / PULL_STATUS_FILE
+
+def write_pull_status(
+    account: str,
+    folder: str,
+    total: int,
+    completed: int = 0,
+    root: Path | None = None,
+) -> None:
+    """Write pull status to file."""
+    root = root or get_eml_root()
+    status_path = get_pull_status_path(root)
+    status = {
+        "pid": os.getpid(),
+        "account": account,
+        "folder": folder,
+        "total": total,
+        "completed": completed,
+        "started": datetime.now().isoformat(),
+    }
+    status_path.write_text(json.dumps(status, indent=2) + "\n")
+
+def update_pull_status(completed: int, root: Path | None = None) -> None:
+    """Update completed count in pull status file."""
+    root = root or get_eml_root()
+    status_path = get_pull_status_path(root)
+    if not status_path.exists():
+        return
+    try:
+        status = json.loads(status_path.read_text())
+        status["completed"] = completed
+        status_path.write_text(json.dumps(status, indent=2) + "\n")
+    except Exception:
+        pass
+
+def clear_pull_status(root: Path | None = None) -> None:
+    """Remove pull status file."""
+    root = root or get_eml_root()
+    status_path = get_pull_status_path(root)
+    if status_path.exists():
+        status_path.unlink()
+
+def read_pull_status(root: Path | None = None) -> dict | None:
+    """Read pull status from file. Returns None if no active pull or stale."""
+    root = root or get_eml_root()
+    status_path = get_pull_status_path(root)
+    if not status_path.exists():
+        return None
+    try:
+        status = json.loads(status_path.read_text())
+        pid = status.get("pid")
+        # Check if process is still running
+        if pid:
+            try:
+                os.kill(pid, 0)  # Signal 0 just checks if process exists
+            except OSError:
+                # Process not running, stale status file
+                status_path.unlink()
+                return None
+        return status
+    except Exception:
+        return None
 
 
 def get_storage_layout(root: Path | None = None) -> StorageLayout:
@@ -775,6 +847,12 @@ def pull(
         total = len(uids)
         console = Console()
 
+        # Write pull status file (for `eml status` to read)
+        if has_cfg and not dry_run:
+            write_pull_status(account, src_folder, total, 0, root)
+            # Register cleanup on exit (normal or abnormal)
+            atexit.register(clear_pull_status, root)
+
         def save_checkpoint():
             if not dry_run and max_uid > 0:
                 if has_cfg:
@@ -913,9 +991,15 @@ def pull(
                 # Save checkpoint periodically
                 if (i + 1) % checkpoint_interval == 0:
                     save_checkpoint()
+                    if has_cfg and not dry_run:
+                        update_pull_status(i + 1, root)
 
         # Final sync state update
         save_checkpoint()
+
+        # Clear pull status file (we're done)
+        if has_cfg and not dry_run:
+            clear_pull_status(root)
 
         # Save failures to disk 
         if has_cfg and not dry_run:
@@ -1451,6 +1535,130 @@ def stats():
     except FileNotFoundError as e:
         err(str(e))
         sys.exit(1)
+
+
+# ============================================================================
+# status
+# ============================================================================
+
+@main.command()
+@require_init
+@option('-c', '--color', is_flag=True, help="Force color output (for use with watch)")
+@option('-f', '--folder', multiple=True, help="Filter to specific folder(s)")
+def status(color: bool, folder: tuple[str, ...]):
+    """Show pull progress and recent activity.
+
+    \b
+    Examples:
+      eml status                    # Show current status
+      eml status -f Sent            # Show only Sent folder
+      watch -c -n5 eml status -c    # Monitor with colors
+
+    Shows total files, pending failures, hourly download histogram,
+    and the 10 most recently downloaded files.
+    """
+    from collections import defaultdict
+
+    root = get_eml_root()
+    folder_filter = set(folder) if folder else None
+
+    # Colors
+    use_color = color or (sys.stdout.isatty() and not os.environ.get('NO_COLOR'))
+    if use_color:
+        BOLD, DIM, GREEN, YELLOW, CYAN, RESET = '\033[1m', '\033[2m', '\033[32m', '\033[33m', '\033[36m', '\033[0m'
+    else:
+        BOLD = DIM = GREEN = YELLOW = CYAN = RESET = ''
+
+    now = datetime.now()
+
+    # Collect all .eml files with mtime in single pass
+    files = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Check folder filter
+        if folder_filter:
+            rel_dir = os.path.relpath(dirpath, root)
+            top_folder = rel_dir.split(os.sep)[0] if rel_dir != '.' else ''
+            if top_folder not in folder_filter:
+                continue
+        for fname in filenames:
+            if fname.endswith('.eml'):
+                path = os.path.join(dirpath, fname)
+                try:
+                    mtime = os.stat(path).st_mtime
+                    files.append((mtime, path))
+                except OSError:
+                    pass
+
+    total = len(files)
+
+    # Count failures (filter by folder if specified)
+    failures_dir = root / ".eml" / "failures"
+    total_failures = 0
+    if failures_dir.exists():
+        for fail_file in failures_dir.glob("*.yaml"):
+            # Filter: filename is like y_Inbox.yaml - check if folder matches
+            if folder_filter:
+                file_folder = fail_file.stem.split('_', 1)[1] if '_' in fail_file.stem else ''
+                if file_folder not in folder_filter:
+                    continue
+            try:
+                for line in fail_file.read_text().splitlines():
+                    if line and line[0].isdigit():
+                        total_failures += 1
+            except Exception:
+                pass
+
+    # Header
+    folder_str = f" ({', '.join(folder)})" if folder else ""
+    print(f"{BOLD}EML Pull Status{folder_str}{RESET} - {now:%Y-%m-%d %H:%M:%S}")
+    print()
+    print(f"{CYAN}Total files:{RESET}     {total}")
+    print(f"{YELLOW}Pending retry:{RESET}  {total_failures}")
+    print()
+
+    # Hourly distribution (last 24h) - bucket by wall clock hour
+    print(f"{BOLD}Downloads by hour (last 24h):{RESET}")
+    hourly = defaultdict(int)
+    cutoff = now - timedelta(hours=24)
+    for mtime, _ in files:
+        if mtime >= cutoff.timestamp():
+            dt = datetime.fromtimestamp(mtime)
+            hour_key = dt.replace(minute=0, second=0, microsecond=0)
+            hourly[hour_key] += 1
+
+    for hour_key in sorted(hourly.keys()):
+        count = hourly[hour_key]
+        bar = '█' * (count // 50)
+        print(f"  {hour_key:%Y-%m-%d %H}:00  {count:4d} {bar}")
+    print()
+
+    # Last 10 downloaded (oldest first, most recent at bottom)
+    print(f"{BOLD}Last 10 downloaded:{RESET}")
+    files.sort(reverse=True)
+    for mtime, path in reversed(files[:10]):
+        dt = datetime.fromtimestamp(mtime)
+        rel_path = os.path.relpath(path, root)
+        folder = os.path.dirname(rel_path)
+        fname = os.path.basename(path).removesuffix('.eml')
+        if len(fname) > 45:
+            fname = fname[:42] + '...'
+        print(f"  {DIM}{dt:%Y-%m-%d %H:%M:%S}{RESET} {GREEN}{folder}/{RESET}{fname}")
+    print()
+
+    # Check if pull running by reading local status file
+    pull_status = read_pull_status(root)
+    if pull_status:
+        acct = pull_status.get("account", "?")
+        fldr = pull_status.get("folder", "?")
+        completed = pull_status.get("completed", 0)
+        total_msgs = pull_status.get("total", 0)
+        if total_msgs > 0:
+            pct = completed * 100 // total_msgs
+            print(f"{GREEN}● Pull in progress: {acct}/{fldr} ({completed}/{total_msgs}, {pct}%){RESET}")
+        else:
+            print(f"{GREEN}● Pull in progress: {acct}/{fldr}{RESET}")
+    else:
+        print(f"{DIM}○ No pull running{RESET}")
 
 
 # ============================================================================
