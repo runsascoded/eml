@@ -19,7 +19,7 @@ ZOHO_IMAP_PORT = 993
 @dataclass
 class EmailInfo:
     """Lightweight email metadata for listing/filtering."""
-    uid: bytes
+    uid: bytes | int
     message_id: str
     date: datetime | None
     from_addr: str
@@ -176,15 +176,23 @@ class IMAPClient:
                     total += int(match.group(1))
         return total
 
-    def fetch_info(self, uid: bytes) -> EmailInfo:
+    def fetch_info(self, uid: bytes | int) -> EmailInfo:
         """Fetch lightweight email info (headers only)."""
+        # Ensure UID is bytes for imaplib
+        uid_bytes = uid if isinstance(uid, bytes) else str(uid).encode()
         typ, data = self.conn.uid(
-            "FETCH", uid, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID DATE FROM TO CC SUBJECT)])"
+            "FETCH", uid_bytes, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID DATE FROM TO CC SUBJECT)])"
         )
         if typ != "OK" or not data or not data[0]:
             raise RuntimeError(f"Failed to fetch headers for UID {uid}")
 
+        # Handle unexpected response format
+        if not isinstance(data[0], tuple) or len(data[0]) < 2:
+            raise RuntimeError(f"Unexpected FETCH response format for UID {uid}: {data[0]!r}")
+
         header_data = data[0][1]
+        if isinstance(header_data, int):
+            raise RuntimeError(f"Got integer instead of bytes for UID {uid}: {header_data}")
         msg = email.message_from_bytes(header_data, policy=email_policy)
 
         date = None
@@ -204,12 +212,23 @@ class IMAPClient:
             subject=msg.get("Subject", ""),
         )
 
-    def fetch_raw(self, uid: bytes) -> bytes:
+    def fetch_raw(self, uid: bytes | int) -> bytes:
         """Fetch full raw message by UID."""
-        typ, data = self.conn.uid("FETCH", uid, "(RFC822)")
+        # Ensure UID is bytes for imaplib
+        uid_bytes = uid if isinstance(uid, bytes) else str(uid).encode()
+        typ, data = self.conn.uid("FETCH", uid_bytes, "(RFC822)")
         if typ != "OK" or not data or not data[0]:
             raise RuntimeError(f"Failed to fetch message for UID {uid}")
-        return data[0][1]
+
+        # Handle unexpected response format
+        if not isinstance(data[0], tuple) or len(data[0]) < 2:
+            raise RuntimeError(f"Unexpected FETCH response format for UID {uid}: {data[0]!r}")
+
+        raw_data = data[0][1]
+        if isinstance(raw_data, int):
+            raise RuntimeError(f"Got integer instead of bytes for UID {uid}: {raw_data}")
+
+        return raw_data
 
     def get_message_ids(self, folder: str) -> set[str]:
         """Get all Message-IDs in a folder (for deduplication)."""

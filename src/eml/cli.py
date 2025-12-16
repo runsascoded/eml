@@ -765,6 +765,17 @@ def pull(
     root = find_eml_root()
     has_cfg = root and has_config(root)
 
+    # Check if another pull is already running in this worktree
+    if has_cfg and not dry_run:
+        existing = read_pull_status(root)
+        if existing:
+            pid = existing.get("pid")
+            acct = existing.get("account", "?")
+            fldr = existing.get("folder", "?")
+            err(f"Another pull is already running: {acct}/{fldr} [PID {pid}]")
+            err(f"Wait for it to finish or kill it with: kill {pid}")
+            sys.exit(1)
+
     # Create IMAP client
     if has_cfg and isinstance(acct, AccountConfig) and acct.host:
         client = IMAPClient(acct.host, acct.port)
@@ -1652,11 +1663,13 @@ def status(color: bool, folder: tuple[str, ...]):
         fldr = pull_status.get("folder", "?")
         completed = pull_status.get("completed", 0)
         total_msgs = pull_status.get("total", 0)
+        pid = pull_status.get("pid")
+        pid_str = f" [PID {pid}]" if pid else ""
         if total_msgs > 0:
             pct = completed * 100 // total_msgs
-            print(f"{GREEN}● Pull in progress: {acct}/{fldr} ({completed}/{total_msgs}, {pct}%){RESET}")
+            print(f"{GREEN}● Pull in progress: {acct}/{fldr} ({completed}/{total_msgs}, {pct}%){pid_str}{RESET}")
         else:
-            print(f"{GREEN}● Pull in progress: {acct}/{fldr}{RESET}")
+            print(f"{GREEN}● Pull in progress: {acct}/{fldr}{pid_str}{RESET}")
     else:
         print(f"{DIM}○ No pull running{RESET}")
 
