@@ -212,6 +212,47 @@ class IMAPClient:
             subject=msg.get("Subject", ""),
         )
 
+    def fetch_message_ids_batch(self, uids: list[bytes | int], batch_size: int = 500) -> dict[int, str]:
+        """Batch fetch Message-IDs for multiple UIDs.
+
+        Returns dict mapping UID (int) -> Message-ID (str).
+        Much faster than individual fetch_info() calls.
+        """
+        result = {}
+        # Convert all UIDs to int for consistent keys
+        uid_list = [int(u) if isinstance(u, bytes) else u for u in uids]
+
+        for i in range(0, len(uid_list), batch_size):
+            batch = uid_list[i:i + batch_size]
+            # IMAP UID FETCH accepts comma-separated UIDs
+            uid_set = ",".join(str(u) for u in batch)
+            typ, data = self.conn.uid(
+                "FETCH", uid_set, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"
+            )
+            if typ != "OK":
+                continue
+
+            # Parse response - each message gets a tuple (metadata, headers)
+            for item in data:
+                if not isinstance(item, tuple) or len(item) < 2:
+                    continue
+                # First element is like b'7763 (UID 1299856 BODY[HEADER.FIELDS (MESSAGE-ID)] {42}'
+                meta = item[0]
+                if isinstance(meta, bytes):
+                    # Extract UID from response (look for "UID <number>")
+                    uid_match = re.search(rb"UID (\d+)", meta)
+                    if uid_match:
+                        uid_int = int(uid_match.group(1))
+                        # Parse headers
+                        header_data = item[1]
+                        if isinstance(header_data, bytes):
+                            msg = email.message_from_bytes(header_data, policy=email_policy)
+                            msg_id = msg.get("Message-ID", "")
+                            if msg_id:
+                                result[uid_int] = msg_id
+
+        return result
+
     def fetch_raw(self, uid: bytes | int) -> bytes:
         """Fetch full raw message by UID."""
         # Ensure UID is bytes for imaplib

@@ -292,7 +292,7 @@ class TestStatus:
         assert result.exit_code == 0
         assert "Total files:" in result.output
         assert "0" in result.output
-        assert "No pull running" in result.output
+        assert "No sync running" in result.output
 
     def test_status_with_files(self, runner, project):
         """Status should count .eml files."""
@@ -399,3 +399,465 @@ class TestIndex:
         monkeypatch.chdir(tmp_path)
         result = runner.invoke(main, ["index"])
         assert result.exit_code == 1
+
+
+class TestAttachments:
+    """Tests for eml attachments commands."""
+
+    @pytest.fixture
+    def test_eml(self, tmp_path):
+        """Create a test .eml file with an attachment."""
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+        from email.mime.base import MIMEBase
+        from email import encoders
+        import hashlib
+
+        msg = MIMEMultipart()
+        msg['From'] = 'sender@example.com'
+        msg['To'] = 'recipient@example.com'
+        msg['Subject'] = 'Test with attachment'
+        msg['Message-ID'] = '<test-attachment-123@example.com>'
+        msg['Date'] = 'Wed, 01 Jan 2025 12:00:00 +0000'
+
+        # Text body
+        body = MIMEText('This is the email body.', 'plain', 'utf-8')
+        msg.attach(body)
+
+        # Text file attachment
+        attachment_content = b'Hello, this is the attachment content!\nLine 2\nLine 3\n'
+        attachment = MIMEBase('text', 'plain')
+        attachment.set_payload(attachment_content)
+        encoders.encode_base64(attachment)
+        attachment.add_header('Content-Disposition', 'attachment', filename='test_file.txt')
+        msg.attach(attachment)
+
+        raw = msg.as_bytes()
+        sha = hashlib.sha256(raw).hexdigest()[:8]
+        eml_path = tmp_path / f"{sha}_test.eml"
+        eml_path.write_bytes(raw)
+        return eml_path
+
+    def test_attachments_list(self, runner, test_eml):
+        """List attachments in an .eml file."""
+        result = runner.invoke(main, ["attachments", "list", str(test_eml)])
+        assert result.exit_code == 0
+        assert "test_file.txt" in result.output
+        assert "text/plain" in result.output
+
+    def test_attachments_list_json(self, runner, test_eml):
+        """List attachments as JSON."""
+        result = runner.invoke(main, ["attachments", "list", "-j", str(test_eml)])
+        assert result.exit_code == 0
+        import json
+        data = json.loads(result.output)
+        assert len(data) == 1
+        assert data[0]["filename"] == "test_file.txt"
+        assert data[0]["content_type"] == "text/plain"
+        assert data[0]["size"] == 53
+
+    def test_attachments_extract(self, runner, test_eml, tmp_path):
+        """Extract an attachment from .eml file."""
+        out_path = tmp_path / "extracted.txt"
+        result = runner.invoke(
+            main,
+            ["attachments", "extract", str(test_eml), "test_file.txt", "-o", str(out_path)],
+        )
+        assert result.exit_code == 0
+        assert out_path.exists()
+        content = out_path.read_text()
+        assert "Hello, this is the attachment content!" in content
+
+    def test_attachments_add(self, runner, test_eml, tmp_path):
+        """Add an attachment to .eml file."""
+        # Create a new file to attach
+        new_file = tmp_path / "new_attachment.txt"
+        new_file.write_text("New attachment content")
+
+        out_eml = tmp_path / "output.eml"
+        result = runner.invoke(
+            main,
+            ["attachments", "add", str(test_eml), str(new_file), "-o", str(out_eml)],
+        )
+        assert result.exit_code == 0
+        assert out_eml.exists()
+
+        # Verify both attachments are present
+        result = runner.invoke(main, ["attachments", "list", str(out_eml)])
+        assert "test_file.txt" in result.output
+        assert "new_attachment.txt" in result.output
+
+    def test_attachments_replace(self, runner, test_eml, tmp_path):
+        """Replace an attachment in .eml file."""
+        # Create replacement file
+        replacement = tmp_path / "replacement.txt"
+        replacement.write_text("Replaced content here!")
+
+        out_eml = tmp_path / "output.eml"
+        result = runner.invoke(
+            main,
+            ["attachments", "replace", str(test_eml), "test_file.txt", str(replacement), "-o", str(out_eml)],
+        )
+        assert result.exit_code == 0
+        assert out_eml.exists()
+
+        # Extract and verify replacement
+        extracted = tmp_path / "extracted.txt"
+        runner.invoke(main, ["attachments", "extract", str(out_eml), "test_file.txt", "-o", str(extracted)])
+        content = extracted.read_text()
+        assert content == "Replaced content here!"
+
+    def test_attachments_remove(self, runner, test_eml, tmp_path):
+        """Remove an attachment from .eml file."""
+        out_eml = tmp_path / "output.eml"
+        result = runner.invoke(
+            main,
+            ["attachments", "remove", str(test_eml), "test_file.txt", "-o", str(out_eml)],
+        )
+        assert result.exit_code == 0
+        assert out_eml.exists()
+
+        # Verify attachment is gone
+        result = runner.invoke(main, ["attachments", "list", str(out_eml)])
+        assert "No attachments" in result.output
+
+    def test_attachments_sha_rename(self, runner, tmp_path):
+        """Test that SHA in filename is updated when content changes."""
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+        from email.mime.base import MIMEBase
+        from email import encoders
+        import hashlib
+
+        # Create original message
+        msg = MIMEMultipart()
+        msg['From'] = 'test@example.com'
+        msg['Subject'] = 'SHA test'
+        msg['Message-ID'] = '<sha-test@example.com>'
+        body = MIMEText('Body', 'plain')
+        msg.attach(body)
+        att = MIMEBase('text', 'plain')
+        att.set_payload(b'original')
+        encoders.encode_base64(att)
+        att.add_header('Content-Disposition', 'attachment', filename='file.txt')
+        msg.attach(att)
+
+        raw = msg.as_bytes()
+        sha = hashlib.sha256(raw).hexdigest()[:8]
+        eml_path = tmp_path / f"{sha}_sha_test.eml"
+        eml_path.write_bytes(raw)
+
+        # Add a new attachment (without -k or -o, should rename)
+        new_file = tmp_path / "new.txt"
+        new_file.write_text("new content")
+
+        result = runner.invoke(main, ["attachments", "add", str(eml_path), str(new_file)])
+        assert result.exit_code == 0
+        assert "->" in result.output  # Should show rename
+
+        # Original should be deleted, new file should exist with different SHA
+        assert not eml_path.exists()
+        new_files = list(tmp_path.glob("*_sha_test.eml"))
+        assert len(new_files) == 1
+        assert new_files[0].name != eml_path.name
+
+
+class TestIngest:
+    """Tests for eml ingest command."""
+
+    @pytest.fixture
+    def ingest_project(self, tmp_path, monkeypatch):
+        """Create an initialized project in a subdirectory for ingest tests."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        monkeypatch.chdir(project_dir)
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+        assert result.exit_code == 0
+        return project_dir
+
+    @pytest.fixture
+    def external_eml(self, tmp_path):
+        """Create an external .eml file to ingest (sibling to project dir)."""
+        from email.mime.text import MIMEText
+
+        msg = MIMEText('Test body', 'plain')
+        msg['From'] = 'external@example.com'
+        msg['To'] = 'internal@example.com'
+        msg['Subject'] = 'External email for ingest'
+        msg['Message-ID'] = '<ingest-test-123@example.com>'
+        msg['Date'] = 'Thu, 02 Jan 2025 10:30:00 +0000'
+
+        # Put in sibling dir so it's not scanned by TreeLayout
+        external_dir = tmp_path / "external"
+        external_dir.mkdir()
+        eml_path = external_dir / "external_email.eml"
+        eml_path.write_bytes(msg.as_bytes())
+        return eml_path
+
+    def test_ingest_basic(self, runner, ingest_project, external_eml):
+        """Ingest an external .eml file into the repo."""
+        result = runner.invoke(main, ["ingest", str(external_eml), "-f", "INBOX"])
+        assert result.exit_code == 0
+        assert "Copied" in result.output
+
+        # Verify file exists in INBOX folder
+        inbox = ingest_project / "INBOX"
+        assert inbox.exists()
+        eml_files = list(inbox.rglob("*.eml"))
+        assert len(eml_files) == 1
+
+    def test_ingest_move(self, runner, ingest_project, external_eml):
+        """Ingest with move should delete original."""
+        result = runner.invoke(main, ["ingest", str(external_eml), "-f", "INBOX", "-M"])
+        assert result.exit_code == 0
+        assert "Moved" in result.output
+
+        # Original should be gone
+        assert not external_eml.exists()
+
+        # File should exist in project
+        eml_files = list((ingest_project / "INBOX").rglob("*.eml"))
+        assert len(eml_files) == 1
+
+    def test_ingest_dry_run(self, runner, ingest_project, external_eml):
+        """Ingest dry run should not create files."""
+        result = runner.invoke(main, ["ingest", str(external_eml), "-f", "INBOX", "-N"])
+        assert result.exit_code == 0
+        assert "Would copy" in result.output
+
+        # File should still exist externally
+        assert external_eml.exists()
+
+        # No files in project
+        inbox = ingest_project / "INBOX"
+        if inbox.exists():
+            eml_files = list(inbox.rglob("*.eml"))
+            assert len(eml_files) == 0
+
+    def test_ingest_duplicate(self, runner, ingest_project, external_eml):
+        """Ingest should skip duplicates by Message-ID."""
+        # Ingest once
+        runner.invoke(main, ["ingest", str(external_eml), "-f", "INBOX"])
+
+        # Copy external_eml to a new location and try again
+        copy_path = external_eml.parent / "copy.eml"
+        copy_path.write_bytes(external_eml.read_bytes())
+
+        result = runner.invoke(main, ["ingest", str(copy_path), "-f", "INBOX"])
+        assert result.exit_code == 0
+        assert "Skipped (duplicate)" in result.output
+
+        # Still only one file
+        eml_files = list((ingest_project / "INBOX").rglob("*.eml"))
+        assert len(eml_files) == 1
+
+    def test_ingest_requires_init(self, runner, tmp_path, monkeypatch):
+        """Ingest should fail without .eml/ directory."""
+        monkeypatch.chdir(tmp_path)
+        eml = tmp_path / "test.eml"
+        eml.write_text("From: a@b.com\n\nBody")
+
+        result = runner.invoke(main, ["ingest", str(eml)])
+        assert result.exit_code == 1
+
+
+class TestAttachmentsIngestE2E:
+    """End-to-end test: in-place attachment modification and ingest in a git+eml repo."""
+
+    def test_e2e_in_place_attachment_modification(self, runner, tmp_path, monkeypatch):
+        """
+        Real-world workflow: downsize an attachment in an existing repo.
+
+        Scenario: An .eml file has a large attachment that's too big to push.
+        We extract it, downsize it, replace it in-place (SHA-based rename),
+        then ingest a second .eml file. Verify final git worktree state.
+
+        Steps:
+        1. Init git + eml project with flat layout
+        2. Create initial .eml with "large" attachment in Inbox/
+        3. Git add + commit the initial state
+        4. Extract the attachment
+        5. "Downsize" it (create smaller version)
+        6. Replace attachment in-place (no -o flag) - should rename file due to SHA change
+        7. Verify old file gone, new file exists with different SHA in name
+        8. Ingest a second .eml from external location
+        9. Git add + commit final state
+        10. Verify final worktree hash
+        """
+        import hashlib
+        import subprocess
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+        from email.mime.base import MIMEBase
+        from email import encoders
+
+        def hash_worktree(root: Path) -> str:
+            """Hash git-tracked files in worktree for deterministic comparison."""
+            # Use git ls-files to get tracked files, then hash their contents
+            result = subprocess.run(
+                ["git", "ls-files"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            files = []
+            for rel_path in sorted(result.stdout.strip().split("\n")):
+                if rel_path:
+                    full_path = root / rel_path
+                    if full_path.is_file():
+                        content_hash = hashlib.sha256(full_path.read_bytes()).hexdigest()
+                        files.append(f"{rel_path}:{content_hash}")
+            return hashlib.sha256("\n".join(files).encode()).hexdigest()
+
+        def make_eml(from_addr: str, subject: str, msg_id: str, attachment_data: bytes) -> bytes:
+            """Create a test .eml with attachment."""
+            msg = MIMEMultipart()
+            msg['From'] = from_addr
+            msg['To'] = 'recipient@example.com'
+            msg['Subject'] = subject
+            msg['Message-ID'] = msg_id
+            msg['Date'] = 'Fri, 03 Jan 2025 14:00:00 +0000'
+
+            body = MIMEText('Email body', 'plain')
+            msg.attach(body)
+
+            att = MIMEBase('application', 'octet-stream')
+            att.set_payload(attachment_data)
+            encoders.encode_base64(att)
+            att.add_header('Content-Disposition', 'attachment', filename='image.jpg')
+            msg.attach(att)
+
+            return msg.as_bytes()
+
+        # Step 1: Init git + eml project
+        project = tmp_path / "repo"
+        project.mkdir()
+        monkeypatch.chdir(project)
+
+        subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=project, check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test User"],
+            cwd=project, check=True, capture_output=True,
+        )
+
+        result = runner.invoke(main, ["init", "-L", "flat"])
+        assert result.exit_code == 0
+
+        # Step 2: Create initial .eml with "large" attachment
+        large_attachment = b"X" * 1000  # Simulates large image
+        raw1 = make_eml(
+            "sender@example.com",
+            "Photo from vacation",
+            "<photo-001@example.com>",
+            large_attachment,
+        )
+        sha1 = hashlib.sha256(raw1).hexdigest()[:8]
+
+        inbox = project / "Inbox"
+        inbox.mkdir()
+        eml1_path = inbox / f"{sha1}_Photo_from_vacation.eml"
+        eml1_path.write_bytes(raw1)
+
+        # Step 3: Git commit initial state
+        subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Initial: large attachment"],
+            cwd=project, check=True, capture_output=True,
+        )
+
+        initial_hash = hash_worktree(project)
+
+        # Step 4: Extract the attachment
+        extracted = tmp_path / "extracted_image.jpg"
+        result = runner.invoke(
+            main,
+            ["attachments", "extract", str(eml1_path), "image.jpg", "-o", str(extracted)],
+        )
+        assert result.exit_code == 0
+        assert extracted.read_bytes() == large_attachment
+
+        # Step 5: "Downsize" the attachment
+        small_attachment = b"Y" * 100  # Downsized version
+        downsized = tmp_path / "downsized_image.jpg"
+        downsized.write_bytes(small_attachment)
+
+        # Step 6: Replace attachment in-place (no -o, no -k)
+        result = runner.invoke(
+            main,
+            ["attachments", "replace", str(eml1_path), "image.jpg", str(downsized)],
+        )
+        assert result.exit_code == 0
+        assert "->" in result.output  # Should show rename
+
+        # Step 7: Verify old file gone, new file exists
+        assert not eml1_path.exists(), "Original file should be deleted"
+        new_eml_files = list(inbox.glob("*.eml"))
+        assert len(new_eml_files) == 1
+        new_eml1_path = new_eml_files[0]
+        assert new_eml1_path.name != eml1_path.name, "Filename should change due to SHA"
+
+        # Verify the new file has the downsized attachment
+        import email
+        with open(new_eml1_path, 'rb') as f:
+            modified_msg = email.message_from_binary_file(f)
+        assert modified_msg['Message-ID'] == '<photo-001@example.com>'
+        for part in modified_msg.walk():
+            if part.get_filename() == 'image.jpg':
+                assert part.get_payload(decode=True) == small_attachment
+                break
+        else:
+            pytest.fail("Attachment not found in modified message")
+
+        # Step 8: Ingest a second .eml from external location
+        external_dir = tmp_path / "external"
+        external_dir.mkdir()
+
+        raw2 = make_eml(
+            "friend@example.com",
+            "Another photo",
+            "<photo-002@example.com>",
+            b"Z" * 50,  # Small attachment
+        )
+        external_eml = external_dir / "friend_photo.eml"
+        external_eml.write_bytes(raw2)
+
+        result = runner.invoke(main, ["ingest", str(external_eml), "-f", "Inbox"])
+        assert result.exit_code == 0
+        assert "Copied" in result.output
+
+        # Should now have 2 .eml files in Inbox
+        final_eml_files = list(inbox.glob("*.eml"))
+        assert len(final_eml_files) == 2
+
+        # Step 9: Git commit final state
+        subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Downsized attachment + ingested second email"],
+            cwd=project, check=True, capture_output=True,
+        )
+
+        # Step 10: Verify final worktree hash changed
+        final_hash = hash_worktree(project)
+        assert final_hash != initial_hash, "Worktree should have changed"
+
+        # Verify git log shows 2 commits
+        log_result = subprocess.run(
+            ["git", "log", "--oneline"],
+            cwd=project, capture_output=True, text=True, check=True,
+        )
+        commits = [c for c in log_result.stdout.strip().split("\n") if c]
+        assert len(commits) == 2
+
+        # Verify both messages are preserved
+        message_ids = set()
+        for eml_file in final_eml_files:
+            with open(eml_file, 'rb') as f:
+                msg = email.message_from_binary_file(f)
+                message_ids.add(msg['Message-ID'])
+        assert message_ids == {'<photo-001@example.com>', '<photo-002@example.com>'}

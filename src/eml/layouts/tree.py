@@ -2,6 +2,7 @@
 
 import email
 import email.utils
+import sqlite3
 from datetime import datetime, timezone
 from email.message import Message
 from pathlib import Path
@@ -63,6 +64,38 @@ class TreeLayout:
         )
         return self._root / path_str
 
+    def _load_index_from_db(self) -> tuple[dict[str, Path], dict[str, Path]] | None:
+        """Try to load indices from persistent index.db (created by `eml index`).
+
+        Returns (message_id_index, content_hash_index) if index.db exists and is valid,
+        or None if we need to fall back to scanning.
+        """
+        index_path = self._root / ".eml" / "index.db"
+        if not index_path.exists():
+            return None
+
+        try:
+            conn = sqlite3.connect(index_path)
+            cur = conn.cursor()
+
+            mid_index: dict[str, Path] = {}
+            hash_index: dict[str, Path] = {}
+
+            # Load message_id -> path mappings
+            cur.execute("SELECT path, message_id, content_hash FROM files WHERE message_id IS NOT NULL OR content_hash IS NOT NULL")
+            for row in cur.fetchall():
+                path_str, message_id, content_hash = row
+                path = self._root / path_str
+                if message_id:
+                    mid_index[message_id] = path
+                if content_hash:
+                    hash_index[content_hash] = path
+
+            conn.close()
+            return mid_index, hash_index
+        except Exception:
+            return None
+
     def _build_index(self) -> tuple[dict[str, Path], dict[str, Path]]:
         """Build indices by scanning .eml files.
 
@@ -94,9 +127,18 @@ class TreeLayout:
         return mid_index, hash_index
 
     def _get_indices(self) -> tuple[dict[str, Path], dict[str, Path]]:
-        """Get or build the message indices."""
+        """Get or build the message indices.
+
+        Tries to load from persistent index.db first (O(1) lookup),
+        falls back to scanning all files if not available.
+        """
         if self._index is None or self._hash_index is None:
-            self._index, self._hash_index = self._build_index()
+            # Try persistent index first
+            result = self._load_index_from_db()
+            if result:
+                self._index, self._hash_index = result
+            else:
+                self._index, self._hash_index = self._build_index()
         return self._index, self._hash_index
 
     def _parse_eml(self, path: Path) -> StoredMessage | None:

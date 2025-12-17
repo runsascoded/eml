@@ -54,12 +54,85 @@ def has_config(root: Path | None = None) -> bool:
 
 
 # Status file helpers - for tracking active pulls/pushes in this worktree
-SYNC_STATUS_FILE = "sync-status.json"
+# Uses SQLite for atomic updates and real-time progress tracking
+SYNC_STATUS_DB = "sync-status.db"
 
-def get_sync_status_path(root: Path | None = None) -> Path:
-    """Get path to sync status file."""
+def get_sync_status_db_path(root: Path | None = None) -> Path:
+    """Get path to sync status database."""
     root = root or get_eml_root()
-    return root / ".eml" / SYNC_STATUS_FILE
+    return root / ".eml" / SYNC_STATUS_DB
+
+def _get_sync_db(root: Path | None = None):
+    """Get connection to sync status database, creating schema if needed."""
+    import sqlite3
+    db_path = get_sync_status_db_path(root)
+    conn = sqlite3.connect(db_path, isolation_level=None)  # autocommit for real-time updates
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sync_status (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            pid INTEGER NOT NULL,
+            operation TEXT NOT NULL,
+            account TEXT NOT NULL,
+            folder TEXT NOT NULL,
+            total INTEGER NOT NULL,
+            completed INTEGER NOT NULL DEFAULT 0,
+            skipped INTEGER NOT NULL DEFAULT 0,
+            failed INTEGER NOT NULL DEFAULT 0,
+            started TEXT NOT NULL,
+            current_subject TEXT
+        )
+    """)
+    # Push log for "Last 10 uploaded" feature
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS push_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            path TEXT,
+            subject TEXT,
+            pushed_at TEXT NOT NULL
+        )
+    """)
+    return conn
+
+
+def log_pushed_message(
+    account: str,
+    message_id: str,
+    path: str | None,
+    subject: str | None,
+    root: Path | None = None,
+) -> None:
+    """Log a pushed message for 'Last 10 uploaded' display."""
+    conn = _get_sync_db(root)
+    conn.execute("""
+        INSERT INTO push_log (account, message_id, path, subject, pushed_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, (account, message_id, path, subject, datetime.now().isoformat()))
+    conn.close()
+
+
+def get_recent_pushed(limit: int = 10, root: Path | None = None) -> list[dict]:
+    """Get recently pushed messages for display."""
+    import sqlite3
+    db_path = get_sync_status_db_path(root)
+    if not db_path.exists():
+        return []
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT account, message_id, path, subject, pushed_at
+            FROM push_log
+            ORDER BY pushed_at DESC
+            LIMIT ?
+        """, (limit,))
+        results = [dict(row) for row in cur.fetchall()]
+    except sqlite3.OperationalError:
+        results = []
+    conn.close()
+    return results
 
 def write_sync_status(
     operation: str,  # "pull" or "push"
@@ -69,64 +142,95 @@ def write_sync_status(
     completed: int = 0,
     root: Path | None = None,
 ) -> None:
-    """Write sync status to file."""
-    root = root or get_eml_root()
-    status_path = get_sync_status_path(root)
-    status = {
-        "pid": os.getpid(),
-        "operation": operation,
-        "account": account,
-        "folder": folder,
-        "total": total,
-        "completed": completed,
-        "started": datetime.now().isoformat(),
-    }
-    status_path.write_text(json.dumps(status, indent=2) + "\n")
+    """Initialize sync status in database."""
+    conn = _get_sync_db(root)
+    conn.execute("DELETE FROM sync_status")
+    conn.execute("""
+        INSERT INTO sync_status (id, pid, operation, account, folder, total, completed, started)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+    """, (os.getpid(), operation, account, folder, total, completed, datetime.now().isoformat()))
+    conn.close()
 
 def update_sync_status(completed: int, root: Path | None = None) -> None:
-    """Update completed count in sync status file."""
-    root = root or get_eml_root()
-    status_path = get_sync_status_path(root)
-    if not status_path.exists():
-        return
+    """Update completed count in sync status database."""
     try:
-        status = json.loads(status_path.read_text())
-        status["completed"] = completed
-        status_path.write_text(json.dumps(status, indent=2) + "\n")
+        conn = _get_sync_db(root)
+        conn.execute("UPDATE sync_status SET completed = ? WHERE id = 1", (completed,))
+        conn.close()
+    except Exception:
+        pass
+
+def update_sync_progress(
+    completed: int | None = None,
+    skipped: int | None = None,
+    failed: int | None = None,
+    current_subject: str | None = None,
+    root: Path | None = None,
+) -> None:
+    """Update sync progress with fine-grained fields. Only updates non-None fields."""
+    try:
+        conn = _get_sync_db(root)
+        updates = []
+        params = []
+        if completed is not None:
+            updates.append("completed = ?")
+            params.append(completed)
+        if skipped is not None:
+            updates.append("skipped = ?")
+            params.append(skipped)
+        if failed is not None:
+            updates.append("failed = ?")
+            params.append(failed)
+        if current_subject is not None:
+            updates.append("current_subject = ?")
+            params.append(current_subject[:100] if current_subject else None)
+        if updates:
+            conn.execute(f"UPDATE sync_status SET {', '.join(updates)} WHERE id = 1", params)
+        conn.close()
     except Exception:
         pass
 
 def clear_sync_status(root: Path | None = None) -> None:
-    """Remove sync status file."""
-    root = root or get_eml_root()
-    status_path = get_sync_status_path(root)
-    if status_path.exists():
-        status_path.unlink()
+    """Clear sync status from database."""
+    try:
+        conn = _get_sync_db(root)
+        conn.execute("DELETE FROM sync_status")
+        conn.close()
+    except Exception:
+        pass
 
 def read_sync_status(root: Path | None = None) -> dict | None:
-    """Read sync status from file. Returns None if no active sync or stale."""
+    """Read sync status from database. Returns None if no active sync or stale."""
     root = root or get_eml_root()
-    status_path = get_sync_status_path(root)
-    if not status_path.exists():
+    db_path = get_sync_status_db_path(root)
+    if not db_path.exists():
         return None
     try:
-        status = json.loads(status_path.read_text())
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM sync_status WHERE id = 1")
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return None
+        status = dict(row)
         pid = status.get("pid")
         # Check if process is still running
         if pid:
             try:
                 os.kill(pid, 0)  # Signal 0 just checks if process exists
             except OSError:
-                # Process not running, stale status file
-                status_path.unlink()
+                # Process not running, stale status
+                clear_sync_status(root)
                 return None
         return status
     except Exception:
         return None
 
 # Backwards compatibility aliases
-PULL_STATUS_FILE = SYNC_STATUS_FILE
-get_pull_status_path = get_sync_status_path
+PULL_STATUS_DB = SYNC_STATUS_DB
+get_pull_status_path = get_sync_status_db_path
 
 def write_pull_status(account: str, folder: str, total: int, completed: int = 0, root: Path | None = None) -> None:
     write_sync_status("pull", account, folder, total, completed, root)
@@ -866,21 +970,53 @@ def pull(
         if limit:
             uids = uids[:limit]
 
+        total_candidates = len(uids)
+        echo(f"Found {total_candidates} candidate messages")
+
+        # Initialize counters
+        skipped_in_prefetch = 0
+        all_uids_max = last_uid or 0
+
+        # Batch fetch Message-IDs from server for dedup (much faster than individual fetches)
+        if not dry_run and total_candidates > 0 and has_cfg:
+            echo("Fetching Message-IDs for deduplication...")
+            server_msg_ids = client.fetch_message_ids_batch(uids)
+            echo(f"  Got {len(server_msg_ids)} Message-IDs from server")
+
+            # Track max UID from all candidates (for sync state), not just fetched ones
+            all_uids_max = max(int(u) if isinstance(u, bytes) else u for u in uids) if uids else (last_uid or 0)
+
+            # Filter out UIDs we already have locally
+            uids_to_fetch = []
+            for uid in uids:
+                uid_int = int(uid) if isinstance(uid, bytes) else uid
+                msg_id = server_msg_ids.get(uid_int)
+                if msg_id and layout.has_message(msg_id):
+                    skipped_in_prefetch += 1
+                else:
+                    uids_to_fetch.append(uid)
+
+            echo(f"  Skipped {skipped_in_prefetch} duplicates, {len(uids_to_fetch)} to fetch")
+            uids = uids_to_fetch
+
         echo(f"Fetching {len(uids)} messages...")
         echo()
 
         fetched = 0
-        skipped = 0
+        skipped = skipped_in_prefetch
         failed = 0
         consecutive_errors = 0
         aborted = False
-        max_uid = last_uid or 0
-        total = len(uids)
+        max_uid = all_uids_max
+        # total_for_status includes prefetch skips (for accurate % in eml status)
+        # total_for_loop is just the remaining UIDs (for progress bar)
+        total_for_status = total_candidates
+        total_for_loop = len(uids)
         console = Console()
 
         # Write pull status file (for `eml status` to read)
         if has_cfg and not dry_run:
-            write_pull_status(account, src_folder, total, 0, root)
+            write_pull_status(account, src_folder, total_for_status, skipped_in_prefetch, root)
             # Register cleanup on exit (normal or abnormal)
             atexit.register(clear_pull_status, root)
 
@@ -916,7 +1052,7 @@ def pull(
             TimeRemainingColumn(),
             console=console,
         ) as progress:
-            task = progress.add_task("pull", total=total)
+            task = progress.add_task("pull", total=total_for_loop)
 
             for i, uid in enumerate(uids):
                 uid_int = int(uid)
@@ -950,6 +1086,9 @@ def pull(
                         if verbose:
                             print_result("skip", subj)
                         progress.advance(task)
+                        # Update sync progress
+                        if has_cfg:
+                            update_sync_progress(completed=fetched + skipped + failed, skipped=skipped, current_subject=subj, root=root)
                         continue
 
                 if dry_run:
@@ -969,6 +1108,9 @@ def pull(
                         if verbose:
                             print_result("skip", subj)
                         progress.advance(task)
+                        # Update sync progress
+                        if has_cfg and not dry_run:
+                            update_sync_progress(completed=fetched + skipped + failed, skipped=skipped, current_subject=subj, root=root)
                         continue
 
                     if has_cfg:
@@ -1013,6 +1155,16 @@ def pull(
 
                 progress.advance(task)
 
+                # Update sync progress for real-time status display
+                if has_cfg and not dry_run:
+                    update_sync_progress(
+                        completed=fetched + skipped + failed,
+                        skipped=skipped,
+                        failed=failed,
+                        current_subject=subj if 'subj' in dir() else None,
+                        root=root,
+                    )
+
                 # Check for rate limit (consecutive errors)
                 if consecutive_errors >= max_errors:
                     console.print(f"\n[bold red]Aborting: {consecutive_errors} consecutive errors (likely rate limited)[/]")
@@ -1022,8 +1174,6 @@ def pull(
                 # Save checkpoint periodically
                 if (i + 1) % checkpoint_interval == 0:
                     save_checkpoint()
-                    if has_cfg and not dry_run:
-                        update_pull_status(i + 1, root)
 
         # Final sync state update
         save_checkpoint()
@@ -1266,6 +1416,8 @@ def push(
                         if success[0] == "OK":
                             if has_cfg:
                                 mark_pushed(account, msg.message_id, root)
+                                # Log for "Last 10 uploaded" feature
+                                log_pushed_message(account, msg.message_id, str(msg.path) if hasattr(msg, 'path') else None, msg.subject, root)
                             else:
                                 storage.mark_pushed(msg.message_id, dst_type, dst_user, dst_folder)
                             pushed += 1
@@ -1287,6 +1439,16 @@ def push(
                             print_result("fail", subj, str(e))
 
                 progress.advance(task)
+
+                # Update sync status for real-time progress
+                if has_cfg and not dry_run:
+                    update_sync_progress(
+                        completed=pushed + failed + skipped,
+                        skipped=skipped,
+                        failed=failed,
+                        current_subject=subj,
+                        root=root,
+                    )
 
                 # Delay between requests (for rate limiting)
                 if delay > 0 and not dry_run:
@@ -1697,6 +1859,25 @@ def status(color: bool, folder: tuple[str, ...]):
         print(f"  {DIM}{dt:%Y-%m-%d %H:%M:%S}{RESET} {GREEN}{folder}/{RESET}{fname}")
     print()
 
+    # Last 10 uploaded (if any)
+    recent_pushed = get_recent_pushed(10, root)
+    if recent_pushed:
+        print(f"{BOLD}Last 10 uploaded:{RESET}")
+        for entry in reversed(recent_pushed):  # oldest first, most recent at bottom
+            pushed_at = entry.get("pushed_at", "")
+            account = entry.get("account", "?")
+            subject = entry.get("subject") or "(no subject)"
+            if len(subject) > 50:
+                subject = subject[:47] + "..."
+            # Parse ISO timestamp
+            try:
+                dt = datetime.fromisoformat(pushed_at)
+                dt_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                dt_str = pushed_at[:19] if len(pushed_at) >= 19 else pushed_at
+            print(f"  {DIM}{dt_str}{RESET} {YELLOW}{account}{RESET} {subject}")
+        print()
+
     # Check if sync (pull or push) running by reading local status file
     sync_status = read_sync_status(root)
     if sync_status:
@@ -1704,15 +1885,32 @@ def status(color: bool, folder: tuple[str, ...]):
         acct = sync_status.get("account", "?")
         fldr = sync_status.get("folder", "?")
         completed = sync_status.get("completed", 0)
+        skipped = sync_status.get("skipped", 0)
+        failed = sync_status.get("failed", 0)
         total_msgs = sync_status.get("total", 0)
+        current_subject = sync_status.get("current_subject")
         pid = sync_status.get("pid")
         pid_str = f" [PID {pid}]" if pid else ""
         op_label = op.capitalize()
+
+        # Build progress string
         if total_msgs > 0:
             pct = completed * 100 // total_msgs
-            print(f"{GREEN}● {op_label} in progress: {acct}/{fldr} ({completed}/{total_msgs}, {pct}%){pid_str}{RESET}")
+            progress_str = f"{completed}/{total_msgs} ({pct}%)"
         else:
-            print(f"{GREEN}● {op_label} in progress: {acct}/{fldr}{pid_str}{RESET}")
+            progress_str = str(completed) if completed else "starting..."
+
+        # Build details string
+        details = []
+        if skipped > 0:
+            details.append(f"{skipped} skipped")
+        if failed > 0:
+            details.append(f"{failed} failed")
+        details_str = f" [{', '.join(details)}]" if details else ""
+
+        print(f"{GREEN}● {op_label} in progress: {acct}/{fldr} {progress_str}{details_str}{pid_str}{RESET}")
+        if current_subject:
+            print(f"  {DIM}Current: {current_subject}{RESET}")
     else:
         print(f"{DIM}○ No sync running{RESET}")
 
