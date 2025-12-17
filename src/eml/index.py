@@ -1,6 +1,7 @@
 """Persistent index for .eml files."""
 
 import email
+import email.utils
 import sqlite3
 import subprocess
 from dataclasses import dataclass
@@ -294,7 +295,9 @@ class FileIndex:
         # Find all .eml files
         eml_files = []
         for eml_path in self._root.rglob("*.eml"):
-            # Skip .eml directory itself
+            # Skip directories and .eml directory contents
+            if not eml_path.is_file():
+                continue
             if ".eml" in eml_path.parts[:-1]:
                 continue
             eml_files.append(eml_path)
@@ -442,7 +445,6 @@ class FileIndex:
         date_str = msg.get("Date", "")
         if date_str:
             try:
-                import email.utils
                 date = email.utils.parsedate_to_datetime(date_str)
             except Exception:
                 pass
