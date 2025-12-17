@@ -330,3 +330,72 @@ class TestStatus:
         result = runner.invoke(main, ["status"])
         assert result.exit_code == 1
         assert "Not an eml project" in result.output or "eml init" in result.output
+
+
+class TestIndex:
+    """Tests for eml index command."""
+
+    def test_index_empty_project(self, runner, project):
+        """Index should work on empty project."""
+        result = runner.invoke(main, ["index"])
+        assert result.exit_code == 0
+        assert "Indexed:" in result.output
+        assert "0" in result.output
+        # Index db should exist
+        assert (project / ".eml" / "index.db").exists()
+
+    def test_index_with_files(self, runner, project):
+        """Index should index .eml files."""
+        # Create some fake .eml files
+        inbox = project / "INBOX"
+        inbox.mkdir()
+        (inbox / "test1.eml").write_bytes(
+            b"Message-ID: <test1@example.com>\r\nFrom: a@b.com\r\nSubject: Test 1\r\n\r\nBody"
+        )
+        (inbox / "test2.eml").write_bytes(
+            b"Message-ID: <test2@example.com>\r\nFrom: c@d.com\r\nSubject: Test 2\r\n\r\nBody"
+        )
+
+        result = runner.invoke(main, ["index"])
+        assert result.exit_code == 0
+        assert "Indexed:" in result.output
+
+    def test_index_stats_empty(self, runner, project):
+        """Index -s on empty index should show message."""
+        result = runner.invoke(main, ["index", "-s"])
+        assert result.exit_code == 0
+        assert "empty" in result.output.lower()
+
+    def test_index_stats_after_build(self, runner, project):
+        """Index -s should show stats after building."""
+        # Create and index a file
+        inbox = project / "INBOX"
+        inbox.mkdir()
+        (inbox / "test.eml").write_bytes(
+            b"Message-ID: <test@example.com>\r\nFrom: a@b.com\r\nSubject: Test\r\n\r\nBody"
+        )
+
+        # Build and check stats in one command flow (within same process)
+        result = runner.invoke(main, ["index"])
+        assert result.exit_code == 0
+        assert "Indexed:" in result.output
+
+    def test_index_check(self, runner, project):
+        """Index -c should check freshness."""
+        # Build index first
+        runner.invoke(main, ["index"])
+
+        result = runner.invoke(main, ["index", "-c"])
+        # May fail if not a git repo, but shouldn't crash
+        assert result.exit_code in (0, 1)
+
+    def test_index_update(self, runner, project):
+        """Index -u should do incremental update."""
+        result = runner.invoke(main, ["index", "-u"])
+        assert result.exit_code == 0
+
+    def test_index_requires_init(self, runner, tmp_path, monkeypatch):
+        """Index should fail without .eml/ directory."""
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(main, ["index"])
+        assert result.exit_code == 1

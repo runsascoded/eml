@@ -1,6 +1,7 @@
 """CLI for email migration."""
 
 import atexit
+import email
 import imaplib
 import json
 import os
@@ -2004,6 +2005,325 @@ def migrate(
             err(f"  {error}")
         if len(stats.errors) > 10:
             err(f"  ... and {len(stats.errors) - 10} more")
+
+
+# ============================================================================
+# index
+# ============================================================================
+
+@main.command()
+@require_init
+@option('-u', '--update', 'update_only', is_flag=True, help="Incremental update (only new/changed files)")
+@option('-s', '--stats', 'show_stats', is_flag=True, help="Show index statistics")
+@option('-c', '--check', 'check_only', is_flag=True, help="Check index freshness")
+def index(update_only: bool, show_stats: bool, check_only: bool):
+    """Build or update persistent file index.
+
+    \b
+    Examples:
+      eml index                    # Full rebuild
+      eml index -u                 # Incremental update
+      eml index -s                 # Show statistics
+      eml index -c                 # Check if stale
+
+    The index enables O(1) lookups by Message-ID or content hash,
+    instead of scanning all files on each operation.
+    """
+    from .index import FileIndex
+
+    root = get_eml_root()
+    eml_dir = root / ".eml"
+
+    with FileIndex(eml_dir) as idx:
+        if check_only:
+            # Check freshness
+            indexed_sha = idx.get_indexed_sha()
+            head_sha = idx.get_git_head()
+            file_count = idx.file_count()
+
+            if not indexed_sha:
+                echo("No index built yet. Run 'eml index' to create.")
+                sys.exit(1)
+
+            echo(f"Index: {file_count:,} files at {indexed_sha[:8]}")
+
+            if head_sha:
+                if indexed_sha == head_sha:
+                    echo(style("✓ Index is up to date", fg="green"))
+                else:
+                    echo(f"HEAD:  {head_sha[:8]}")
+                    echo(style("Index may be stale. Run 'eml index -u' to update.", fg="yellow"))
+            return
+
+        if show_stats:
+            # Show statistics
+            if idx.file_count() == 0:
+                echo("Index is empty. Run 'eml index' to build.")
+                return
+
+            stats = idx.stats()
+            echo(f"Total files:        {stats['total_files']:,}")
+            echo(f"With Message-ID:    {stats['with_message_id']:,}")
+            echo(f"Without Message-ID: {stats['without_message_id']:,}")
+            if stats['total_size']:
+                echo(f"Total size:         {humanize.naturalsize(stats['total_size'])}")
+            if stats['oldest_date']:
+                echo(f"Date range:         {stats['oldest_date'][:10]} to {stats['newest_date'][:10]}")
+            if stats['indexed_at']:
+                echo(f"Indexed at:         {stats['indexed_at'][:19]}")
+            if stats['git_sha']:
+                echo(f"Git SHA:            {stats['git_sha'][:8]}")
+
+            if stats['folders']:
+                echo()
+                echo("By folder:")
+                for folder, count in sorted(stats['folders'].items(), key=lambda x: -x[1])[:10]:
+                    echo(f"  {folder:20} {count:>8,}")
+            return
+
+        console = Console()
+
+        if update_only:
+            # Incremental update
+            echo("Updating index...")
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold blue]Scanning"),
+                console=console,
+            ) as progress:
+                progress.add_task("scan", total=None)
+                added, modified, deleted = idx.update()
+
+            echo(f"Added:    {added:,}")
+            echo(f"Modified: {modified:,}")
+            echo(f"Deleted:  {deleted:,}")
+        else:
+            # Full rebuild
+            echo("Building index...")
+
+            # Count files first
+            file_count = sum(1 for _ in root.rglob("*.eml")
+                            if ".eml" not in _.parts[:-1])
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold blue]Indexing"),
+                BarColumn(),
+                TaskProgressColumn(),
+                TextColumn("{task.completed}/{task.total}"),
+                TimeElapsedColumn(),
+                console=console,
+            ) as progress:
+                task = progress.add_task("index", total=file_count)
+
+                def progress_cb(current, total):
+                    progress.update(task, completed=current)
+
+                indexed, skipped, errors = idx.rebuild(progress_cb)
+
+            echo()
+            echo(f"Indexed:  {indexed:,}")
+            if skipped:
+                echo(f"Skipped:  {skipped:,}")
+            if errors:
+                echo(style(f"Errors:   {errors}", fg="red"))
+
+        git_sha = idx.get_git_head()
+        if git_sha:
+            echo(f"Git SHA:  {git_sha[:8]}")
+
+
+# ============================================================================
+# fsck
+# ============================================================================
+
+@main.command(no_args_is_help=True)
+@require_init
+@option('-f', '--folder', default="[Gmail]/All Mail", help="IMAP folder to check")
+@option('-j', '--json', 'output_json', is_flag=True, help="Output as JSON")
+@option('-m', '--show-missing', is_flag=True, help="List truly missing messages")
+@option('-v', '--verbose', is_flag=True, help="Show detailed progress")
+@argument('account')
+def fsck(folder: str, output_json: bool, show_missing: bool, verbose: bool, account: str):
+    """Check local storage against IMAP server.
+
+    \b
+    Examples:
+      eml fsck y -f Inbox           # Check Inbox folder
+      eml fsck y -f Sent -m         # Show missing from Sent
+      eml fsck y -j                 # Output as JSON
+
+    Compares Message-IDs on server against local index to identify:
+    - Truly missing messages (not in any local folder)
+    - Cross-folder duplicates (same Message-ID in different folder)
+    """
+    from .index import FileIndex
+
+    root = get_eml_root()
+    eml_dir = root / ".eml"
+    config = load_config(root)
+
+    # Resolve account
+    if account in config.accounts:
+        acct = config.accounts[account]
+    else:
+        err(f"Account not found: {account}")
+        err(f"Available: {', '.join(config.accounts.keys())}")
+        sys.exit(1)
+
+    # Load or build index
+    with FileIndex(eml_dir) as idx:
+        if idx.file_count() == 0:
+            echo("Building index first...")
+            idx.rebuild()
+            echo()
+
+        local_message_ids = idx.all_message_ids()
+        local_hashes = idx.all_content_hashes()
+
+    echo(f"Local index: {len(local_message_ids):,} message IDs, {len(local_hashes):,} content hashes")
+
+    # Connect to IMAP
+    echo(f"Connecting to {acct.host or acct.type}...")
+
+    if acct.type == "gmail":
+        client = GmailClient()
+    elif acct.type == "zoho":
+        client = ZohoClient()
+    elif acct.host:
+        client = IMAPClient(acct.host, acct.port)
+    else:
+        err(f"Unknown account type: {acct.type}")
+        sys.exit(1)
+
+    try:
+        client.connect(acct.user, acct.password)
+        echo(f"Connected as {acct.user}")
+
+        # Select folder
+        typ, data = client.conn.select(folder, readonly=True)
+        if typ != "OK":
+            err(f"Failed to select folder: {folder}")
+            sys.exit(1)
+
+        folder_count = int(data[0])
+        echo(f"Server folder '{folder}': {folder_count:,} messages")
+
+        # Fetch all Message-IDs from server
+        echo("Fetching Message-IDs from server...")
+        console = Console()
+
+        server_ids: dict[str, dict] = {}  # message_id -> {uid, date, subject, from}
+
+        # Fetch in batches for large folders
+        batch_size = 1000
+        total_fetched = 0
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]Fetching"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("fetch", total=folder_count)
+
+            # Use SEARCH to get all UIDs
+            typ, data = client.conn.uid("SEARCH", None, "ALL")
+            if typ != "OK":
+                err("Failed to search folder")
+                sys.exit(1)
+
+            all_uids = data[0].split() if data[0] else []
+
+            for i in range(0, len(all_uids), batch_size):
+                batch = all_uids[i:i + batch_size]
+                uid_set = b",".join(batch)
+
+                # Fetch headers for this batch
+                typ, data = client.conn.uid(
+                    "FETCH", uid_set,
+                    "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID DATE FROM SUBJECT)])"
+                )
+
+                if typ != "OK":
+                    continue
+
+                for item in data:
+                    if isinstance(item, tuple) and len(item) >= 2:
+                        # Parse UID from response
+                        uid_match = re.search(rb"UID (\d+)", item[0])
+                        if not uid_match:
+                            continue
+                        uid = int(uid_match.group(1))
+
+                        try:
+                            msg = email.message_from_bytes(item[1])
+                            mid = msg.get("Message-ID", "").strip()
+                            if mid:
+                                server_ids[mid] = {
+                                    "uid": uid,
+                                    "date": msg.get("Date", ""),
+                                    "from": msg.get("From", ""),
+                                    "subject": msg.get("Subject", ""),
+                                }
+                                total_fetched += 1
+                        except Exception:
+                            pass
+
+                progress.update(task, completed=min(i + batch_size, len(all_uids)))
+
+        echo(f"Server Message-IDs: {len(server_ids):,}")
+
+        # Compare
+        server_set = set(server_ids.keys())
+        local_set = local_message_ids
+
+        missing_from_local = server_set - local_set
+        extra_local = local_set - server_set
+
+        echo()
+        echo(f"Missing from local: {len(missing_from_local):,}")
+        echo(f"Extra in local:     {len(extra_local):,}")
+
+        if output_json:
+            import json as json_mod
+            result = {
+                "folder": folder,
+                "server_count": len(server_ids),
+                "local_count": len(local_message_ids),
+                "missing_count": len(missing_from_local),
+                "extra_count": len(extra_local),
+            }
+            if show_missing:
+                result["missing"] = [
+                    {
+                        "message_id": mid,
+                        "uid": server_ids[mid]["uid"],
+                        "date": server_ids[mid]["date"],
+                        "from": server_ids[mid]["from"],
+                        "subject": server_ids[mid]["subject"][:50],
+                    }
+                    for mid in sorted(missing_from_local)[:100]
+                ]
+            print(json_mod.dumps(result, indent=2))
+        elif show_missing and missing_from_local:
+            echo()
+            echo("Missing messages:")
+            for mid in sorted(missing_from_local)[:50]:
+                info = server_ids[mid]
+                date_str = info["date"][:16] if info["date"] else "?"
+                from_str = info["from"][:30] if info["from"] else "?"
+                subj_str = info["subject"][:40] if info["subject"] else "?"
+                echo(f"  UID {info['uid']:>8}  {date_str}  {from_str}  {subj_str}")
+
+            if len(missing_from_local) > 50:
+                echo(f"  ... and {len(missing_from_local) - 50} more")
+
+    finally:
+        client.disconnect()
 
 
 if __name__ == "__main__":
