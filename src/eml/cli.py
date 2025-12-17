@@ -2171,6 +2171,12 @@ def fsck(folder: str, output_json: bool, show_missing: bool, verbose: bool, acco
         err(f"Available: {', '.join(config.accounts.keys())}")
         sys.exit(1)
 
+    # Count local files in this folder
+    local_folder_path = root / folder
+    local_folder_count = 0
+    if local_folder_path.exists():
+        local_folder_count = sum(1 for _ in local_folder_path.rglob("*.eml") if _.is_file())
+
     # Load or build index
     with FileIndex(eml_dir) as idx:
         if idx.file_count() == 0:
@@ -2182,6 +2188,7 @@ def fsck(folder: str, output_json: bool, show_missing: bool, verbose: bool, acco
         local_hashes = idx.all_content_hashes()
 
     echo(f"Local index: {len(local_message_ids):,} message IDs, {len(local_hashes):,} content hashes")
+    echo(f"Local '{folder}' files: {local_folder_count:,}")
 
     # Connect to IMAP
     echo(f"Connecting to {acct.host or acct.type}...")
@@ -2275,27 +2282,38 @@ def fsck(folder: str, output_json: bool, show_missing: bool, verbose: bool, acco
 
                 progress.update(task, completed=min(i + batch_size, len(all_uids)))
 
-        echo(f"Server Message-IDs: {len(server_ids):,}")
+        # Count messages without Message-ID
+        no_mid_count = folder_count - len(server_ids)
+        echo(f"Server messages with Message-ID: {len(server_ids):,}")
+        echo(f"Server messages without Message-ID: {no_mid_count:,}")
 
-        # Compare
+        # Compare by Message-ID
         server_set = set(server_ids.keys())
         local_set = local_message_ids
 
-        missing_from_local = server_set - local_set
+        missing_by_mid = server_set - local_set
         extra_local = local_set - server_set
 
+        # Summary
         echo()
-        echo(f"Missing from local: {len(missing_from_local):,}")
+        file_diff = folder_count - local_folder_count
+        echo(f"File count diff:    {file_diff:,} (server - local)")
+        echo(f"Missing by Msg-ID:  {len(missing_by_mid):,}")
+        if no_mid_count > 0:
+            echo(f"  (+ {no_mid_count:,} server msgs have no Message-ID to compare)")
         echo(f"Extra in local:     {len(extra_local):,}")
 
         if output_json:
             import json as json_mod
             result = {
                 "folder": folder,
-                "server_count": len(server_ids),
-                "local_count": len(local_message_ids),
-                "missing_count": len(missing_from_local),
-                "extra_count": len(extra_local),
+                "server_total": folder_count,
+                "server_with_mid": len(server_ids),
+                "server_without_mid": no_mid_count,
+                "local_files": local_folder_count,
+                "file_diff": file_diff,
+                "missing_by_mid": len(missing_by_mid),
+                "extra_local": len(extra_local),
             }
             if show_missing:
                 result["missing"] = [
@@ -2306,21 +2324,21 @@ def fsck(folder: str, output_json: bool, show_missing: bool, verbose: bool, acco
                         "from": server_ids[mid]["from"],
                         "subject": server_ids[mid]["subject"][:50],
                     }
-                    for mid in sorted(missing_from_local)[:100]
+                    for mid in sorted(missing_by_mid)[:100]
                 ]
             print(json_mod.dumps(result, indent=2))
-        elif show_missing and missing_from_local:
+        elif show_missing and missing_by_mid:
             echo()
-            echo("Missing messages:")
-            for mid in sorted(missing_from_local)[:50]:
+            echo("Missing messages (by Message-ID):")
+            for mid in sorted(missing_by_mid)[:50]:
                 info = server_ids[mid]
                 date_str = info["date"][:16] if info["date"] else "?"
                 from_str = info["from"][:30] if info["from"] else "?"
                 subj_str = info["subject"][:40] if info["subject"] else "?"
                 echo(f"  UID {info['uid']:>8}  {date_str}  {from_str}  {subj_str}")
 
-            if len(missing_from_local) > 50:
-                echo(f"  ... and {len(missing_from_local) - 50} more")
+            if len(missing_by_mid) > 50:
+                echo(f"  ... and {len(missing_by_mid) - 50} more")
 
     finally:
         client.disconnect()
