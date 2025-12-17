@@ -53,26 +53,28 @@ def has_config(root: Path | None = None) -> bool:
     return (root / ".eml" / "config.yaml").exists()
 
 
-# Pull status file helpers - for tracking active pulls in this worktree
-PULL_STATUS_FILE = "pull-status.json"
+# Status file helpers - for tracking active pulls/pushes in this worktree
+SYNC_STATUS_FILE = "sync-status.json"
 
-def get_pull_status_path(root: Path | None = None) -> Path:
-    """Get path to pull status file."""
+def get_sync_status_path(root: Path | None = None) -> Path:
+    """Get path to sync status file."""
     root = root or get_eml_root()
-    return root / ".eml" / PULL_STATUS_FILE
+    return root / ".eml" / SYNC_STATUS_FILE
 
-def write_pull_status(
+def write_sync_status(
+    operation: str,  # "pull" or "push"
     account: str,
     folder: str,
     total: int,
     completed: int = 0,
     root: Path | None = None,
 ) -> None:
-    """Write pull status to file."""
+    """Write sync status to file."""
     root = root or get_eml_root()
-    status_path = get_pull_status_path(root)
+    status_path = get_sync_status_path(root)
     status = {
         "pid": os.getpid(),
+        "operation": operation,
         "account": account,
         "folder": folder,
         "total": total,
@@ -81,10 +83,10 @@ def write_pull_status(
     }
     status_path.write_text(json.dumps(status, indent=2) + "\n")
 
-def update_pull_status(completed: int, root: Path | None = None) -> None:
-    """Update completed count in pull status file."""
+def update_sync_status(completed: int, root: Path | None = None) -> None:
+    """Update completed count in sync status file."""
     root = root or get_eml_root()
-    status_path = get_pull_status_path(root)
+    status_path = get_sync_status_path(root)
     if not status_path.exists():
         return
     try:
@@ -94,17 +96,17 @@ def update_pull_status(completed: int, root: Path | None = None) -> None:
     except Exception:
         pass
 
-def clear_pull_status(root: Path | None = None) -> None:
-    """Remove pull status file."""
+def clear_sync_status(root: Path | None = None) -> None:
+    """Remove sync status file."""
     root = root or get_eml_root()
-    status_path = get_pull_status_path(root)
+    status_path = get_sync_status_path(root)
     if status_path.exists():
         status_path.unlink()
 
-def read_pull_status(root: Path | None = None) -> dict | None:
-    """Read pull status from file. Returns None if no active pull or stale."""
+def read_sync_status(root: Path | None = None) -> dict | None:
+    """Read sync status from file. Returns None if no active sync or stale."""
     root = root or get_eml_root()
-    status_path = get_pull_status_path(root)
+    status_path = get_sync_status_path(root)
     if not status_path.exists():
         return None
     try:
@@ -121,6 +123,22 @@ def read_pull_status(root: Path | None = None) -> dict | None:
         return status
     except Exception:
         return None
+
+# Backwards compatibility aliases
+PULL_STATUS_FILE = SYNC_STATUS_FILE
+get_pull_status_path = get_sync_status_path
+
+def write_pull_status(account: str, folder: str, total: int, completed: int = 0, root: Path | None = None) -> None:
+    write_sync_status("pull", account, folder, total, completed, root)
+
+update_pull_status = update_sync_status
+clear_pull_status = clear_sync_status
+
+def read_pull_status(root: Path | None = None) -> dict | None:
+    status = read_sync_status(root)
+    if status and status.get("operation") == "pull":
+        return status
+    return None
 
 
 def get_storage_layout(root: Path | None = None) -> StorageLayout:
@@ -257,6 +275,7 @@ class AliasGroup(click.Group):
 # Main group with aliases
 @click.group(cls=AliasGroup, aliases={
     'a': 'account',
+    'at': 'attachments',
     'cv': 'convert',
     'f': 'folders',
     'i': 'init',
@@ -1172,6 +1191,23 @@ def push(
         max_size_bytes = max_size * 1024 * 1024
         console = Console()
 
+        # Check if another sync is already running in this worktree
+        if has_cfg and not dry_run:
+            existing = read_sync_status(root)
+            if existing:
+                pid = existing.get("pid")
+                op = existing.get("operation", "sync")
+                acct = existing.get("account", "?")
+                fldr = existing.get("folder", "?")
+                err(f"Another {op} is already running: {acct}/{fldr} [PID {pid}]")
+                err(f"Wait for it to finish or kill it with: kill {pid}")
+                sys.exit(1)
+
+        # Write push status file (for `eml status` to read)
+        if has_cfg and not dry_run:
+            write_sync_status("push", account, dst_folder, total, 0, root)
+            atexit.register(clear_sync_status, root)
+
         def print_result(status: str, subj: str, detail: str | None = None):
             """Print a result line (scrollable) above the progress bar."""
             if status == "ok":
@@ -1279,6 +1315,10 @@ def push(
                     for msg, error in errors[:5]:
                         subj = (msg.subject or "(no subject)")[:40]
                         echo(f"  {subj}: {error}")
+
+        # Clear push status file (we're done)
+        if has_cfg and not dry_run:
+            clear_sync_status(root)
 
         # Cleanup
         if has_cfg and hasattr(layout, 'disconnect'):
@@ -1657,22 +1697,24 @@ def status(color: bool, folder: tuple[str, ...]):
         print(f"  {DIM}{dt:%Y-%m-%d %H:%M:%S}{RESET} {GREEN}{folder}/{RESET}{fname}")
     print()
 
-    # Check if pull running by reading local status file
-    pull_status = read_pull_status(root)
-    if pull_status:
-        acct = pull_status.get("account", "?")
-        fldr = pull_status.get("folder", "?")
-        completed = pull_status.get("completed", 0)
-        total_msgs = pull_status.get("total", 0)
-        pid = pull_status.get("pid")
+    # Check if sync (pull or push) running by reading local status file
+    sync_status = read_sync_status(root)
+    if sync_status:
+        op = sync_status.get("operation", "sync")
+        acct = sync_status.get("account", "?")
+        fldr = sync_status.get("folder", "?")
+        completed = sync_status.get("completed", 0)
+        total_msgs = sync_status.get("total", 0)
+        pid = sync_status.get("pid")
         pid_str = f" [PID {pid}]" if pid else ""
+        op_label = op.capitalize()
         if total_msgs > 0:
             pct = completed * 100 // total_msgs
-            print(f"{GREEN}● Pull in progress: {acct}/{fldr} ({completed}/{total_msgs}, {pct}%){pid_str}{RESET}")
+            print(f"{GREEN}● {op_label} in progress: {acct}/{fldr} ({completed}/{total_msgs}, {pct}%){pid_str}{RESET}")
         else:
-            print(f"{GREEN}● Pull in progress: {acct}/{fldr}{pid_str}{RESET}")
+            print(f"{GREEN}● {op_label} in progress: {acct}/{fldr}{pid_str}{RESET}")
     else:
-        print(f"{DIM}○ No pull running{RESET}")
+        print(f"{DIM}○ No sync running{RESET}")
 
 
 # ============================================================================
@@ -2342,6 +2384,497 @@ def fsck(folder: str, output_json: bool, show_missing: bool, verbose: bool, acco
 
     finally:
         client.disconnect()
+
+
+# ============================================================================
+# attachments - manipulate attachments in .eml files
+# ============================================================================
+
+def get_attachments(msg: email.message.Message) -> list[dict]:
+    """Get list of attachments from an email message.
+
+    Returns list of dicts with keys: filename, content_type, size, part
+    """
+    attachments = []
+    for part in msg.walk():
+        content_disposition = part.get("Content-Disposition", "")
+        if "attachment" in content_disposition or (
+            part.get_content_maintype() not in ("text", "multipart")
+            and part.get_filename()
+        ):
+            filename = part.get_filename() or "unnamed"
+            payload = part.get_payload(decode=True)
+            size = len(payload) if payload else 0
+            attachments.append({
+                "filename": filename,
+                "content_type": part.get_content_type(),
+                "size": size,
+                "part": part,
+            })
+    return attachments
+
+
+def compute_eml_output_path(
+    original_path: Path,
+    new_content: bytes,
+    keep: bool = False,
+) -> tuple[Path, bool]:
+    """Compute output path for modified .eml file.
+
+    If filename contains a SHA-like pattern (8+ hex chars), replace it with new SHA.
+    Returns (output_path, should_delete_original).
+    """
+    import hashlib
+
+    new_sha = hashlib.sha256(new_content).hexdigest()[:8]
+    name = original_path.name
+
+    # Pattern: 8+ consecutive hex characters (likely SHA)
+    sha_pattern = re.compile(r'[0-9a-f]{8,}', re.IGNORECASE)
+    match = sha_pattern.search(name)
+
+    if match:
+        # Replace SHA in filename
+        old_sha = match.group()
+        new_name = name[:match.start()] + new_sha + name[match.end():]
+        new_path = original_path.parent / new_name
+
+        if new_path == original_path:
+            # SHA didn't change (unlikely but possible)
+            return original_path, False
+        elif keep:
+            # Keep both files
+            return new_path, False
+        else:
+            # Replace: write new, delete old
+            return new_path, True
+    else:
+        # No SHA in filename
+        if keep:
+            # Generate a modified filename
+            stem = original_path.stem
+            suffix = original_path.suffix
+            # Check for existing _v# suffix
+            v_match = re.search(r'_v(\d+)$', stem)
+            if v_match:
+                num = int(v_match.group(1)) + 1
+                new_stem = stem[:v_match.start()] + f"_v{num}"
+            else:
+                new_stem = stem + "_v2"
+            return original_path.parent / (new_stem + suffix), False
+        else:
+            # Overwrite in place
+            return original_path, False
+
+
+def rebuild_message_with_attachments(
+    original: email.message.Message,
+    attachments: list[tuple[str, str, bytes]],
+) -> email.message.Message:
+    """Rebuild a message with new/modified attachments.
+
+    attachments is a list of (filename, content_type, data) tuples.
+    """
+    from email.mime.base import MIMEBase
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    from email import encoders
+
+    # Create new multipart message
+    new_msg = MIMEMultipart()
+
+    # Copy headers (except content-type which will be set by MIMEMultipart)
+    skip_headers = {"content-type", "content-transfer-encoding", "mime-version"}
+    for key, value in original.items():
+        if key.lower() not in skip_headers:
+            new_msg[key] = value
+
+    # Find and copy the text body from original
+    body_added = False
+    for part in original.walk():
+        if part.get_content_maintype() == "text" and not body_added:
+            content_disposition = part.get("Content-Disposition", "")
+            if "attachment" not in content_disposition:
+                text_part = MIMEText(
+                    part.get_payload(decode=True).decode(
+                        part.get_content_charset() or "utf-8", errors="replace"
+                    ),
+                    part.get_content_subtype(),
+                    part.get_content_charset() or "utf-8",
+                )
+                new_msg.attach(text_part)
+                body_added = True
+
+    # Add attachments
+    for filename, content_type, data in attachments:
+        maintype, subtype = content_type.split("/", 1) if "/" in content_type else (content_type, "octet-stream")
+        attachment = MIMEBase(maintype, subtype)
+        attachment.set_payload(data)
+        encoders.encode_base64(attachment)
+        attachment.add_header(
+            "Content-Disposition",
+            "attachment",
+            filename=filename,
+        )
+        new_msg.attach(attachment)
+
+    return new_msg
+
+
+@main.group(cls=AliasGroup, aliases={'l': 'list', 'x': 'extract', 'r': 'replace'})
+def attachments():
+    """Manipulate attachments in .eml files."""
+    pass
+
+
+@attachments.command("list")
+@argument("eml_path", type=click.Path(exists=True))
+@option('-j', '--json', 'as_json', is_flag=True, help="Output as JSON")
+def attachments_list(eml_path: str, as_json: bool):
+    """List attachments in an .eml file."""
+    import json as json_mod
+
+    path = Path(eml_path)
+    with open(path, "rb") as f:
+        msg = email.message_from_binary_file(f)
+
+    atts = get_attachments(msg)
+
+    if as_json:
+        result = [
+            {"filename": a["filename"], "content_type": a["content_type"], "size": a["size"]}
+            for a in atts
+        ]
+        print(json_mod.dumps(result, indent=2))
+    else:
+        if not atts:
+            echo("No attachments")
+            return
+        echo(f"Attachments ({len(atts)}):")
+        for a in atts:
+            size_str = humanize.naturalsize(a["size"], binary=True)
+            echo(f"  {a['filename']:<40} {a['content_type']:<30} {size_str:>10}")
+
+
+@attachments.command("extract")
+@argument("eml_path", type=click.Path(exists=True))
+@argument("attachment_name")
+@option('-o', '--output', 'out_path', type=click.Path(), help="Output path (default: attachment filename)")
+def attachments_extract(eml_path: str, attachment_name: str, out_path: str | None):
+    """Extract an attachment from an .eml file."""
+    path = Path(eml_path)
+    with open(path, "rb") as f:
+        msg = email.message_from_binary_file(f)
+
+    atts = get_attachments(msg)
+
+    # Find matching attachment
+    matches = [a for a in atts if a["filename"] == attachment_name]
+    if not matches:
+        # Try partial match
+        matches = [a for a in atts if attachment_name.lower() in a["filename"].lower()]
+
+    if not matches:
+        err(f"Attachment not found: {attachment_name}")
+        err("Available attachments:")
+        for a in atts:
+            err(f"  {a['filename']}")
+        sys.exit(1)
+
+    if len(matches) > 1:
+        err(f"Multiple matches for '{attachment_name}':")
+        for a in matches:
+            err(f"  {a['filename']}")
+        err("Please specify exact filename")
+        sys.exit(1)
+
+    att = matches[0]
+    data = att["part"].get_payload(decode=True)
+
+    output = Path(out_path) if out_path else Path(att["filename"])
+    output.write_bytes(data)
+    echo(f"Extracted: {output} ({humanize.naturalsize(len(data), binary=True)})")
+
+
+@attachments.command("add")
+@argument("eml_path", type=click.Path(exists=True))
+@argument("file_path", type=click.Path(exists=True))
+@option('-k', '--keep', is_flag=True, help="Keep original file (don't delete when SHA changes)")
+@option('-n', '--name', 'att_name', help="Attachment filename (default: file basename)")
+@option('-o', '--output', 'out_path', type=click.Path(), help="Output .eml path (overrides SHA logic)")
+def attachments_add(eml_path: str, file_path: str, keep: bool, att_name: str | None, out_path: str | None):
+    """Add an attachment to an .eml file."""
+    import mimetypes
+
+    eml = Path(eml_path)
+    file = Path(file_path)
+
+    with open(eml, "rb") as f:
+        msg = email.message_from_binary_file(f)
+
+    # Read new attachment
+    data = file.read_bytes()
+    filename = att_name or file.name
+    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+    # Get existing attachments
+    existing = get_attachments(msg)
+    attachments_list = [
+        (a["filename"], a["content_type"], a["part"].get_payload(decode=True))
+        for a in existing
+    ]
+    attachments_list.append((filename, content_type, data))
+
+    # Rebuild message
+    new_msg = rebuild_message_with_attachments(msg, attachments_list)
+    new_content = new_msg.as_bytes()
+
+    # Determine output path
+    if out_path:
+        output = Path(out_path)
+        delete_original = False
+    else:
+        output, delete_original = compute_eml_output_path(eml, new_content, keep)
+
+    # Write output
+    with open(output, "wb") as f:
+        f.write(new_content)
+
+    # Delete original if needed (SHA-based filename changed)
+    if delete_original and output != eml:
+        eml.unlink()
+        echo(f"Added {filename} ({humanize.naturalsize(len(data), binary=True)})")
+        echo(f"  {eml.name} -> {output.name}")
+    else:
+        echo(f"Added {filename} ({humanize.naturalsize(len(data), binary=True)}) to {output}")
+
+
+@attachments.command("replace")
+@argument("eml_path", type=click.Path(exists=True))
+@argument("attachment_name")
+@argument("file_path", type=click.Path(exists=True))
+@option('-k', '--keep', is_flag=True, help="Keep original file (don't delete when SHA changes)")
+@option('-n', '--name', 'new_name', help="New attachment filename (default: keep original)")
+@option('-o', '--output', 'out_path', type=click.Path(), help="Output .eml path (overrides SHA logic)")
+def attachments_replace(
+    eml_path: str,
+    attachment_name: str,
+    file_path: str,
+    keep: bool,
+    new_name: str | None,
+    out_path: str | None,
+):
+    """Replace an attachment in an .eml file."""
+    import mimetypes
+
+    eml = Path(eml_path)
+    file = Path(file_path)
+
+    with open(eml, "rb") as f:
+        msg = email.message_from_binary_file(f)
+
+    atts = get_attachments(msg)
+
+    # Find matching attachment
+    found_idx = None
+    for i, a in enumerate(atts):
+        if a["filename"] == attachment_name:
+            found_idx = i
+            break
+        if attachment_name.lower() in a["filename"].lower():
+            found_idx = i
+
+    if found_idx is None:
+        err(f"Attachment not found: {attachment_name}")
+        err("Available attachments:")
+        for a in atts:
+            err(f"  {a['filename']}")
+        sys.exit(1)
+
+    # Read replacement file
+    data = file.read_bytes()
+    filename = new_name or atts[found_idx]["filename"]
+    content_type = mimetypes.guess_type(filename)[0] or atts[found_idx]["content_type"]
+
+    # Build new attachments list
+    attachments_list = []
+    for i, a in enumerate(atts):
+        if i == found_idx:
+            attachments_list.append((filename, content_type, data))
+        else:
+            attachments_list.append((
+                a["filename"],
+                a["content_type"],
+                a["part"].get_payload(decode=True),
+            ))
+
+    # Rebuild message
+    new_msg = rebuild_message_with_attachments(msg, attachments_list)
+    new_content = new_msg.as_bytes()
+
+    # Determine output path
+    if out_path:
+        output = Path(out_path)
+        delete_original = False
+    else:
+        output, delete_original = compute_eml_output_path(eml, new_content, keep)
+
+    # Write output
+    with open(output, "wb") as f:
+        f.write(new_content)
+
+    old_size = atts[found_idx]["size"]
+    size_change = f"{humanize.naturalsize(old_size, binary=True)} -> {humanize.naturalsize(len(data), binary=True)}"
+
+    # Delete original if needed (SHA-based filename changed)
+    if delete_original and output != eml:
+        eml.unlink()
+        echo(f"Replaced {attachment_name} ({size_change})")
+        echo(f"  {eml.name} -> {output.name}")
+    else:
+        echo(f"Replaced {attachment_name} ({size_change}) in {output}")
+
+
+@attachments.command("remove")
+@argument("eml_path", type=click.Path(exists=True))
+@argument("attachment_name")
+@option('-k', '--keep', is_flag=True, help="Keep original file (don't delete when SHA changes)")
+@option('-o', '--output', 'out_path', type=click.Path(), help="Output .eml path (overrides SHA logic)")
+def attachments_remove(eml_path: str, attachment_name: str, keep: bool, out_path: str | None):
+    """Remove an attachment from an .eml file."""
+    eml = Path(eml_path)
+
+    with open(eml, "rb") as f:
+        msg = email.message_from_binary_file(f)
+
+    atts = get_attachments(msg)
+
+    # Find matching attachment
+    found_idx = None
+    for i, a in enumerate(atts):
+        if a["filename"] == attachment_name:
+            found_idx = i
+            break
+        if attachment_name.lower() in a["filename"].lower():
+            found_idx = i
+
+    if found_idx is None:
+        err(f"Attachment not found: {attachment_name}")
+        err("Available attachments:")
+        for a in atts:
+            err(f"  {a['filename']}")
+        sys.exit(1)
+
+    # Build new attachments list without the removed one
+    attachments_list = [
+        (a["filename"], a["content_type"], a["part"].get_payload(decode=True))
+        for i, a in enumerate(atts) if i != found_idx
+    ]
+
+    # Rebuild message
+    new_msg = rebuild_message_with_attachments(msg, attachments_list)
+    new_content = new_msg.as_bytes()
+
+    # Determine output path
+    if out_path:
+        output = Path(out_path)
+        delete_original = False
+    else:
+        output, delete_original = compute_eml_output_path(eml, new_content, keep)
+
+    # Write output
+    with open(output, "wb") as f:
+        f.write(new_content)
+
+    removed = atts[found_idx]
+    removed_info = f"{removed['filename']} ({humanize.naturalsize(removed['size'], binary=True)})"
+
+    # Delete original if needed (SHA-based filename changed)
+    if delete_original and output != eml:
+        eml.unlink()
+        echo(f"Removed {removed_info}")
+        echo(f"  {eml.name} -> {output.name}")
+    else:
+        echo(f"Removed {removed_info} from {output}")
+
+
+@main.command()
+@argument("eml_paths", nargs=-1, type=click.Path(exists=True))
+@option('-f', '--folder', default="Inbox", help="Target folder (default: Inbox)")
+@option('-M', '--move', is_flag=True, help="Move (delete original) instead of copy")
+@option('-N', '--dry-run', is_flag=True, help="Show what would happen without doing it")
+def ingest(eml_paths: tuple[str, ...], folder: str, move: bool, dry_run: bool):
+    """Import .eml files into the repo with proper naming.
+
+    Parses each .eml file to extract metadata (date, subject, from),
+    then generates the proper filename based on the configured layout
+    and copies/moves the file to the correct location.
+    """
+    from email.utils import parsedate_to_datetime
+    from datetime import timezone
+
+    if not eml_paths:
+        err("No .eml files specified")
+        sys.exit(1)
+
+    config = load_config()
+    root = find_eml_root()
+    if config.layout.startswith("sqlite"):
+        layout = SqliteLayout(root)
+    else:
+        layout = TreeLayout(root, template=config.layout)
+    root = layout.root
+
+    for eml_path in eml_paths:
+        path = Path(eml_path)
+        if not path.suffix.lower() == ".eml":
+            err(f"Skipping non-.eml file: {path}")
+            continue
+
+        # Read and parse the message
+        raw = path.read_bytes()
+        msg = email.message_from_bytes(raw)
+
+        # Extract metadata
+        date_str = msg.get("Date", "")
+        date = None
+        if date_str:
+            try:
+                date = parsedate_to_datetime(date_str)
+                if date.tzinfo is None:
+                    date = date.replace(tzinfo=timezone.utc)
+            except Exception:
+                pass
+
+        subject = msg.get("Subject", "")
+        from_addr = msg.get("From", "")
+        message_id = msg.get("Message-ID", "")
+
+        # Check for duplicates
+        if message_id and layout.has_message(message_id):
+            echo(f"Skipped (duplicate): {path.name}")
+            continue
+
+        # Generate output path using the layout
+        dest_path = layout.add_message(
+            message_id=message_id or f"<ingest-{path.name}>",
+            raw=raw,
+            folder=folder,
+            date=date,
+            from_addr=from_addr,
+            subject=subject,
+        )
+
+        rel_dest = dest_path.relative_to(root) if dest_path.is_relative_to(root) else dest_path
+
+        if dry_run:
+            echo(f"Would {'move' if move else 'copy'}: {path} -> {rel_dest}")
+            # Clean up the file we just wrote in dry-run mode
+            dest_path.unlink()
+        else:
+            echo(f"{'Moved' if move else 'Copied'}: {path.name} -> {rel_dest}")
+            if move:
+                path.unlink()
 
 
 if __name__ == "__main__":
