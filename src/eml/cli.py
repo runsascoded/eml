@@ -35,6 +35,8 @@ from .config import (
     load_failures, save_failures, add_failure, clear_failure, clear_failures,
     get_failures_path,
 )
+from .pulls import PullsDB, get_pulls_db
+from .layouts.path_template import content_hash
 from .layouts import (
     StorageLayout, StoredMessage, TreeLayout, SqliteLayout,
     PRESETS, LEGACY_PRESETS, resolve_preset,
@@ -929,103 +931,76 @@ def pull(
             if not dry_run:
                 storage.connect()
 
-        # Check sync state (unless --full or --retry)
-        stored_uidvalidity, last_uid = (None, None)
-        if not dry_run and not full and not retry:
-            if has_cfg:
-                sync_state = get_folder_sync_state(account, src_folder, root)
-                if sync_state:
-                    stored_uidvalidity = sync_state.uidvalidity
-                    last_uid = sync_state.last_uid
-            else:
-                stored_uidvalidity, last_uid = storage.get_sync_state(src_type, src_user, src_folder)
+        # Open pulls.db for tracking (Git-tracked, per-UID records)
+        pulls_db: PullsDB | None = None
+        pulled_uids: set[int] = set()
+        stored_uidvalidity: int | None = None
 
-        if stored_uidvalidity and stored_uidvalidity != uidvalidity:
-            echo(style(f"UIDVALIDITY changed ({stored_uidvalidity} → {uidvalidity}), doing full sync", fg="yellow"))
-            last_uid = None
+        if has_cfg and not dry_run:
+            pulls_db = get_pulls_db(root)
+            pulls_db.connect()
+            # Check for UIDVALIDITY change
+            stored_uidvalidity = pulls_db.get_uidvalidity(account, src_folder)
+            if stored_uidvalidity and stored_uidvalidity != uidvalidity:
+                echo(style(f"UIDVALIDITY changed ({stored_uidvalidity} → {uidvalidity})", fg="yellow"))
+                echo("  Previous pull records are invalid (UIDs reassigned by server)")
+                # Note: We keep the old records for reference but they won't match
+                # Could optionally clear them: pulls_db.clear_folder(account, src_folder, stored_uidvalidity)
+            # Get UIDs we've already pulled for this UIDVALIDITY
+            pulled_uids = pulls_db.get_pulled_uids(account, src_folder, uidvalidity)
+            if pulled_uids:
+                echo(f"Already pulled: {len(pulled_uids):,} UIDs (from pulls.db)")
 
-        # Load previous failures for this account/folder 
+        # Load previous failures for this account/folder
         failures = {}
         if has_cfg and not dry_run:
             failures = load_failures(account, src_folder, root)
 
-        # Get UIDs to fetch
+        # Get all UIDs from server
+        all_server_uids = client.search("ALL")
+        echo(f"Server has {len(all_server_uids):,} messages")
+
+        # Determine which UIDs to fetch
         if retry:
             if not failures:
                 echo(style("No failures to retry", fg="yellow"))
+                if pulls_db:
+                    pulls_db.disconnect()
                 return
             # Convert int UIDs to bytes (as returned by IMAP search)
             uids = [str(uid).encode() for uid in sorted(failures.keys())]
             echo(f"Retrying {len(uids)} failed UIDs")
         elif full:
-            echo("Full sync (--full)")
-            uids = client.search("ALL")
-        elif last_uid:
-            echo(f"Incremental sync from UID {last_uid}")
-            uids = client.search_uids_after(last_uid)
+            echo("Full sync (--full) - will check all UIDs")
+            uids = all_server_uids
         else:
-            echo("Full sync")
-            uids = client.search("ALL")
+            # Normal sync: fetch UIDs we haven't pulled yet
+            uids = [u for u in all_server_uids if int(u) not in pulled_uids]
+            if len(uids) < len(all_server_uids):
+                echo(f"Incremental sync: {len(uids):,} new UIDs to check")
+            else:
+                echo("Full sync (no prior pulls)")
 
         if limit:
             uids = uids[:limit]
 
         total_candidates = len(uids)
         echo(f"Found {total_candidates} candidate messages")
-
-        # Initialize counters
-        skipped_in_prefetch = 0
-        all_uids_max = last_uid or 0
-
-        # Batch fetch Message-IDs from server for dedup (much faster than individual fetches)
-        if not dry_run and total_candidates > 0 and has_cfg:
-            echo("Fetching Message-IDs for deduplication...")
-            server_msg_ids = client.fetch_message_ids_batch(uids)
-            echo(f"  Got {len(server_msg_ids)} Message-IDs from server")
-
-            # Track max UID from all candidates (for sync state), not just fetched ones
-            all_uids_max = max(int(u) if isinstance(u, bytes) else u for u in uids) if uids else (last_uid or 0)
-
-            # Filter out UIDs we already have locally
-            uids_to_fetch = []
-            for uid in uids:
-                uid_int = int(uid) if isinstance(uid, bytes) else uid
-                msg_id = server_msg_ids.get(uid_int)
-                if msg_id and layout.has_message(msg_id):
-                    skipped_in_prefetch += 1
-                else:
-                    uids_to_fetch.append(uid)
-
-            echo(f"  Skipped {skipped_in_prefetch} duplicates, {len(uids_to_fetch)} to fetch")
-            uids = uids_to_fetch
-
-        echo(f"Fetching {len(uids)} messages...")
         echo()
 
         fetched = 0
-        skipped = skipped_in_prefetch
+        skipped = 0
         failed = 0
         consecutive_errors = 0
         aborted = False
-        max_uid = all_uids_max
-        # total_for_status includes prefetch skips (for accurate % in eml status)
-        # total_for_loop is just the remaining UIDs (for progress bar)
-        total_for_status = total_candidates
         total_for_loop = len(uids)
         console = Console()
 
         # Write pull status file (for `eml status` to read)
         if has_cfg and not dry_run:
-            write_pull_status(account, src_folder, total_for_status, skipped_in_prefetch, root)
+            write_pull_status(account, src_folder, total_for_loop, 0, root)
             # Register cleanup on exit (normal or abnormal)
             atexit.register(clear_pull_status, root)
-
-        def save_checkpoint():
-            if not dry_run and max_uid > 0:
-                if has_cfg:
-                    set_folder_sync_state(account, src_folder, uidvalidity, max_uid, root)
-                else:
-                    storage.set_sync_state(src_type, src_user, src_folder, uidvalidity, max_uid)
 
         def print_result(status: str, subj: str, detail: str | None = None):
             """Print a result line (scrollable) above the progress bar."""
@@ -1056,8 +1031,8 @@ def pull(
 
             for i, uid in enumerate(uids):
                 uid_int = int(uid)
-                max_uid = max(max_uid, uid_int)
 
+                # Fetch headers first (lightweight)
                 try:
                     info = client.fetch_info(uid)
                 except Exception as e:
@@ -1077,20 +1052,6 @@ def pull(
 
                 subj = (info.subject or "(no subject)")[:60]
 
-                # Check if already stored (by Message-ID if present)
-                # Skip this check for empty Message-ID - will check content hash after fetch
-                if not dry_run and info.message_id:
-                    has_msg = layout.has_message(info.message_id) if has_cfg else storage.has_message(info.message_id)
-                    if has_msg:
-                        skipped += 1
-                        if verbose:
-                            print_result("skip", subj)
-                        progress.advance(task)
-                        # Update sync progress
-                        if has_cfg:
-                            update_sync_progress(completed=fetched + skipped + failed, skipped=skipped, current_subject=subj, root=root)
-                        continue
-
                 if dry_run:
                     if verbose:
                         print_result("dry", subj)
@@ -1098,53 +1059,67 @@ def pull(
                     progress.advance(task)
                     continue
 
-                # Fetch full message and store
+                # Fetch full message
                 try:
                     raw = client.fetch_raw(uid)
+                    raw_hash = content_hash(raw)
 
-                    # Content-hash dedup (catches messages without Message-ID)
+                    # Content-hash dedup - check if we already have this exact content
+                    local_path: str | None = None
                     if has_cfg and layout.has_content(raw):
                         skipped += 1
                         if verbose:
                             print_result("skip", subj)
-                        progress.advance(task)
-                        # Update sync progress
-                        if has_cfg and not dry_run:
-                            update_sync_progress(completed=fetched + skipped + failed, skipped=skipped, current_subject=subj, root=root)
-                        continue
-
-                    if has_cfg:
-                        layout.add_message(
-                            message_id=info.message_id,
-                            raw=raw,
-                            folder=src_folder,
-                            date=info.date,
-                            from_addr=info.from_addr,
-                            to_addr=info.to_addr,
-                            cc_addr=info.cc_addr,
-                            subject=info.subject,
-                            source_uid=str(uid_int),
-                        )
-                        # Clear from failures if previously failed
-                        if uid_int in failures:
-                            del failures[uid_int]
                     else:
-                        storage.add_message(
-                            message_id=info.message_id,
-                            raw=raw,
-                            date=info.date,
-                            from_addr=info.from_addr,
-                            to_addr=info.to_addr,
-                            cc_addr=info.cc_addr,
-                            subject=info.subject,
-                            source_folder=src_folder,
-                            source_uid=str(uid_int),
-                            tags=[tag] if tag else None,
+                        # Store the message
+                        if has_cfg:
+                            stored_path = layout.add_message(
+                                message_id=info.message_id,
+                                raw=raw,
+                                folder=src_folder,
+                                date=info.date,
+                                from_addr=info.from_addr,
+                                to_addr=info.to_addr,
+                                cc_addr=info.cc_addr,
+                                subject=info.subject,
+                                source_uid=str(uid_int),
+                            )
+                            local_path = str(stored_path.relative_to(root)) if stored_path else None
+                        else:
+                            storage.add_message(
+                                message_id=info.message_id,
+                                raw=raw,
+                                date=info.date,
+                                from_addr=info.from_addr,
+                                to_addr=info.to_addr,
+                                cc_addr=info.cc_addr,
+                                subject=info.subject,
+                                source_folder=src_folder,
+                                source_uid=str(uid_int),
+                                tags=[tag] if tag else None,
+                            )
+                        fetched += 1
+                        if verbose:
+                            print_result("ok", subj)
+
+                    # Record successful pull in pulls.db (even for dupes - we pulled it)
+                    if pulls_db:
+                        pulls_db.record_pull(
+                            account=account,
+                            folder=src_folder,
+                            uidvalidity=uidvalidity,
+                            uid=uid_int,
+                            content_hash=raw_hash,
+                            message_id=info.message_id or None,
+                            local_path=local_path,
                         )
-                    fetched += 1
+
+                    # Clear from failures if previously failed
+                    if uid_int in failures:
+                        del failures[uid_int]
+
                     consecutive_errors = 0  # Reset on success
-                    if verbose:
-                        print_result("ok", subj)
+
                 except Exception as e:
                     failed += 1
                     consecutive_errors += 1
@@ -1161,7 +1136,7 @@ def pull(
                         completed=fetched + skipped + failed,
                         skipped=skipped,
                         failed=failed,
-                        current_subject=subj if 'subj' in dir() else None,
+                        current_subject=subj,
                         root=root,
                     )
 
@@ -1171,18 +1146,11 @@ def pull(
                     aborted = True
                     break
 
-                # Save checkpoint periodically
-                if (i + 1) % checkpoint_interval == 0:
-                    save_checkpoint()
-
-        # Final sync state update
-        save_checkpoint()
-
         # Clear pull status file (we're done)
         if has_cfg and not dry_run:
             clear_pull_status(root)
 
-        # Save failures to disk 
+        # Save failures to disk
         if has_cfg and not dry_run:
             # Convert exception objects to PullFailure objects
             failure_records = {}
@@ -1199,6 +1167,10 @@ def pull(
                 echo(f"Skipped (duplicate): {skipped}")
             msg_count = layout.count() if has_cfg else storage.count()
             echo(f"Total in storage: {msg_count:,}")
+            # Show pulls.db stats
+            if pulls_db:
+                pulled_count = pulls_db.get_pulled_count(account, src_folder, uidvalidity)
+                echo(f"Pulled UIDs tracked: {pulled_count:,}")
         if failed:
             echo(style(f"Failed: {failed}", fg="red"))
             if has_cfg and not dry_run:
@@ -1210,6 +1182,8 @@ def pull(
 
         # Cleanup
         if not dry_run:
+            if pulls_db:
+                pulls_db.disconnect()
             if has_cfg and hasattr(layout, 'disconnect'):
                 layout.disconnect()
             elif not has_cfg:
@@ -1828,6 +1802,23 @@ def status(color: bool, folder: tuple[str, ...]):
     print()
     print(f"{CYAN}Total files:{RESET}     {total}")
     print(f"{YELLOW}Pending retry:{RESET}  {total_failures}")
+
+    # Show pulls.db stats if available
+    pulls_db_path = root / ".eml" / "pulls.db"
+    if pulls_db_path.exists():
+        try:
+            pulls_db = get_pulls_db(root)
+            pulls_db.connect()
+            stats = pulls_db.get_stats()
+            pulled_total = stats.get("total", 0)
+            print(f"{GREEN}Pulled UIDs:{RESET}    {pulled_total:,}")
+            if stats.get("folders"):
+                for folder_name, count in sorted(stats["folders"].items()):
+                    if not folder_filter or folder_name in folder_filter:
+                        print(f"  {folder_name}: {count:,}")
+            pulls_db.disconnect()
+        except Exception:
+            pass
     print()
 
     # Hourly distribution (last 24h) - bucket by wall clock hour
@@ -2371,6 +2362,201 @@ def index(update_only: bool, show_stats: bool, check_only: bool):
         git_sha = idx.get_git_head()
         if git_sha:
             echo(f"Git SHA:  {git_sha[:8]}")
+
+
+# ============================================================================
+# backfill
+# ============================================================================
+
+@main.command(no_args_is_help=True)
+@require_init
+@option('-f', '--folder', default="Inbox", help="IMAP folder to backfill")
+@option('-l', '--limit', type=int, help="Limit number of UIDs to process")
+@option('-n', '--dry-run', is_flag=True, help="Show what would be done")
+@option('-v', '--verbose', is_flag=True, help="Show each UID processed")
+@argument('account')
+def backfill(folder: str, limit: int | None, dry_run: bool, verbose: bool, account: str):
+    """Backfill pulls.db by matching server UIDs to local files via Message-ID.
+
+    \b
+    Examples:
+      eml backfill y -f Inbox         # Backfill Inbox UIDs
+      eml backfill y -f Inbox -n      # Dry run
+      eml backfill y -f Inbox -l 100  # Process first 100 UIDs
+
+    This command:
+    1. Fetches UID + Message-ID for all messages in folder (fast, headers only)
+    2. Looks up each Message-ID in local index.db
+    3. Records UID → content_hash mapping in pulls.db
+    4. Reports UIDs that couldn't be matched (need full pull)
+
+    Use this to populate pulls.db for existing repos without re-downloading.
+    Requires index.db to exist (run 'eml index' first).
+    """
+    from .index import FileIndex
+
+    root = get_eml_root()
+    eml_dir = root / ".eml"
+
+    # Check index exists
+    index_path = eml_dir / "index.db"
+    if not index_path.exists():
+        err("No index.db found. Run 'eml index' first.")
+        sys.exit(1)
+
+    # Look up account
+    acct = get_account_any(account)
+    if not acct:
+        err(f"Account '{account}' not found.")
+        sys.exit(1)
+
+    src_user = acct.user
+    src_password = acct.password
+
+    # Create IMAP client
+    if isinstance(acct, AccountConfig) and acct.host:
+        client = IMAPClient(acct.host, acct.port)
+    else:
+        client = get_imap_client(acct.type)
+
+    echo(f"Account: {account} ({src_user})")
+    echo(f"Folder: {folder}")
+    if dry_run:
+        echo(style("DRY RUN - no changes will be made", fg="yellow"))
+    echo()
+
+    try:
+        client.connect(src_user, src_password)
+        msg_count, uidvalidity = client.select_folder(folder, readonly=True)
+        echo(f"Server: {msg_count:,} messages (UIDVALIDITY: {uidvalidity})")
+
+        # Get all UIDs
+        all_uids = client.search("ALL")
+        if limit:
+            all_uids = all_uids[:limit]
+        echo(f"Processing {len(all_uids):,} UIDs...")
+        echo()
+
+        # Batch fetch Message-IDs from server
+        echo("Fetching Message-IDs from server...")
+        server_msg_ids = client.fetch_message_ids_batch(all_uids)
+        echo(f"  Got {len(server_msg_ids):,} Message-IDs")
+
+        uids_without_mid = len(all_uids) - len(server_msg_ids)
+        if uids_without_mid > 0:
+            echo(f"  {uids_without_mid:,} UIDs have no Message-ID")
+        echo()
+
+        # Open index.db and pulls.db
+        with FileIndex(eml_dir) as idx:
+            # Build message_id -> (content_hash, path) mapping from index
+            echo("Loading local index...")
+            local_by_mid: dict[str, tuple[str, str]] = {}
+            for f in idx.iter_files():
+                if f.message_id:
+                    local_by_mid[f.message_id] = (f.content_hash, f.path)
+            echo(f"  {len(local_by_mid):,} local files with Message-ID")
+            echo()
+
+            # Open pulls.db
+            if not dry_run:
+                pulls_db = get_pulls_db(root)
+                pulls_db.connect()
+                existing_uids = pulls_db.get_pulled_uids(account, folder, uidvalidity)
+                echo(f"Already in pulls.db: {len(existing_uids):,} UIDs")
+            else:
+                existing_uids = set()
+
+            # Match UIDs to local files
+            matched = 0
+            already_tracked = 0
+            no_mid = 0
+            not_found = 0
+            not_found_mids: list[tuple[int, str]] = []
+
+            console = Console()
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold blue]Backfilling"),
+                BarColumn(),
+                TaskProgressColumn(),
+                TextColumn("{task.completed}/{task.total}"),
+                console=console,
+            ) as progress:
+                task = progress.add_task("backfill", total=len(all_uids))
+
+                for uid_bytes in all_uids:
+                    uid = int(uid_bytes)
+                    progress.advance(task)
+
+                    # Skip if already tracked
+                    if uid in existing_uids:
+                        already_tracked += 1
+                        continue
+
+                    # Get Message-ID for this UID
+                    mid = server_msg_ids.get(uid)
+                    if not mid:
+                        no_mid += 1
+                        if verbose:
+                            console.print(f"  [yellow]?[/] UID {uid}: no Message-ID")
+                        continue
+
+                    # Look up in local index
+                    local_info = local_by_mid.get(mid)
+                    if not local_info:
+                        not_found += 1
+                        not_found_mids.append((uid, mid))
+                        if verbose:
+                            console.print(f"  [red]✗[/] UID {uid}: not in local index")
+                        continue
+
+                    content_hash, local_path = local_info
+                    matched += 1
+
+                    if verbose:
+                        console.print(f"  [green]✓[/] UID {uid} → {local_path[:50]}...")
+
+                    # Record in pulls.db
+                    if not dry_run:
+                        pulls_db.record_pull(
+                            account=account,
+                            folder=folder,
+                            uidvalidity=uidvalidity,
+                            uid=uid,
+                            content_hash=content_hash,
+                            message_id=mid,
+                            local_path=local_path,
+                        )
+
+            if not dry_run:
+                pulls_db.disconnect()
+
+        # Summary
+        echo()
+        echo(f"Matched:         {matched:,}")
+        echo(f"Already tracked: {already_tracked:,}")
+        if no_mid > 0:
+            echo(style(f"No Message-ID:   {no_mid:,}", fg="yellow"))
+        if not_found > 0:
+            echo(style(f"Not in local:    {not_found:,}", fg="red"))
+            echo("  These UIDs need full pull to download content")
+
+        if not dry_run:
+            pulls_db = get_pulls_db(root)
+            pulls_db.connect()
+            total_tracked = pulls_db.get_pulled_count(account, folder, uidvalidity)
+            pulls_db.disconnect()
+            echo()
+            echo(f"Total tracked:   {total_tracked:,}")
+
+    except Exception as e:
+        err(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+    finally:
+        client.disconnect()
 
 
 # ============================================================================
