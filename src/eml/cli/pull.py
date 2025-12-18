@@ -156,9 +156,10 @@ def pull(
         if has_cfg and not dry_run:
             failures = load_failures(account, src_folder, root)
 
-        # Get all UIDs from server
-        all_server_uids = client.search("ALL")
-        echo(f"Server has {len(all_server_uids):,} messages")
+        # Get UIDs to fetch - use cached server_uids if available
+        cached_server_uids: set[int] = set()
+        if pulls_db and uidvalidity:
+            cached_server_uids = pulls_db.get_server_uids(account, src_folder, uidvalidity)
 
         # Determine which UIDs to fetch
         if retry:
@@ -170,16 +171,27 @@ def pull(
             # Convert int UIDs to bytes (as returned by IMAP search)
             uids = [str(uid).encode() for uid in sorted(failures.keys())]
             echo(f"Retrying {len(uids)} failed UIDs")
-        elif full:
-            echo("Full sync (--full) - will check all UIDs")
-            uids = all_server_uids
+        elif cached_server_uids and not full:
+            # Use cached UIDs - much faster than IMAP SEARCH
+            echo(f"Using cached server UIDs: {len(cached_server_uids):,}")
+            unpulled = cached_server_uids - pulled_uids
+            uids = [str(uid).encode() for uid in sorted(unpulled)]
+            echo(f"Unpulled: {len(uids):,} UIDs")
         else:
-            # Normal sync: fetch UIDs we haven't pulled yet
-            uids = [u for u in all_server_uids if int(u) not in pulled_uids]
-            if len(uids) < len(all_server_uids):
-                echo(f"Incremental sync: {len(uids):,} new UIDs to check")
+            # No cache or --full: fetch from server
+            echo("Fetching UID list from server...")
+            all_server_uids = client.search("ALL")
+            echo(f"Server has {len(all_server_uids):,} messages")
+            if full:
+                echo("Full sync (--full) - will check all UIDs")
+                uids = all_server_uids
             else:
-                echo("Full sync (no prior pulls)")
+                # Normal sync: fetch UIDs we haven't pulled yet
+                uids = [u for u in all_server_uids if int(u) not in pulled_uids]
+                if len(uids) < len(all_server_uids):
+                    echo(f"Incremental sync: {len(uids):,} new UIDs to check")
+                else:
+                    echo("Full sync (no prior pulls)")
 
         if limit:
             uids = uids[:limit]
@@ -357,6 +369,14 @@ def pull(
                         current_subject=subj,
                         root=root,
                     )
+                    # Also update sync_runs table for UI consistency
+                    if pulls_db and sync_run_id:
+                        pulls_db.update_sync_run(
+                            sync_run_id,
+                            fetched=fetched,
+                            skipped=skipped,
+                            failed=failed,
+                        )
 
                 # Check for rate limit (consecutive errors)
                 if consecutive_errors >= max_errors:
@@ -391,11 +411,14 @@ def pull(
         if has_cfg and not dry_run:
             # Convert exception objects to PullFailure objects
             # (failures dict may contain both Exception objects and PullFailure objects from load_failures)
+            # Use duck typing (hasattr) instead of isinstance to avoid module reloading issues
             failure_records = {}
             for uid, exc in failures.items():
-                if isinstance(exc, PullFailure):
-                    failure_records[uid] = exc
+                if hasattr(exc, 'error') and hasattr(exc, 'uid'):
+                    # It's a PullFailure-like object - use its error field
+                    failure_records[uid] = PullFailure(uid=uid, error=exc.error)
                 else:
+                    # It's an Exception - convert to string
                     failure_records[uid] = PullFailure(uid=uid, error=str(exc))
             save_failures(account, src_folder, failure_records, root)
 

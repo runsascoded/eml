@@ -115,7 +115,7 @@ def api_recent(limit: int = 20, account: str | None = None, folder: str | None =
                     "folder": p.folder,
                     "path": p.local_path,
                     "pulled_at": p.pulled_at.isoformat(),
-                    "is_new": p.local_path is not None,  # True if new file, False if deduped
+                    "is_new": p.status != "skipped",  # True if new file, False if deduped
                     "subject": p.subject,
                     "msg_date": p.msg_date,
                 }
@@ -324,7 +324,7 @@ def api_folder_detail(account: str, folder: str, recent_limit: int = 50, runs_li
                     "folder": p.folder,
                     "path": p.local_path,
                     "pulled_at": p.pulled_at.isoformat(),
-                    "is_new": p.local_path is not None,
+                    "is_new": p.status != "skipped",
                     "subject": p.subject,
                     "msg_date": p.msg_date,
                 }

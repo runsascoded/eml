@@ -61,6 +61,7 @@ class RecentPull:
     pulled_at: datetime
     subject: str | None = None
     msg_date: str | None = None
+    status: str | None = None
 
 
 class PullsDB:
@@ -559,7 +560,7 @@ class PullsDB:
         params.append(limit)
 
         cur = self.conn.execute(f"""
-            SELECT uid, folder, local_path, pulled_at, subject, msg_date
+            SELECT uid, folder, local_path, pulled_at, subject, msg_date, status
             FROM pulled_messages
             {where}
             ORDER BY pulled_at DESC
@@ -574,6 +575,7 @@ class PullsDB:
                 pulled_at=datetime.fromisoformat(row["pulled_at"]),
                 subject=row["subject"],
                 msg_date=row["msg_date"],
+                status=row["status"],
             )
             for row in cur
         ]
@@ -652,8 +654,8 @@ class PullsDB:
         cur = self.conn.execute(f"""
             SELECT
                 strftime('%Y-%m-%d %H:00', pulled_at) as hour,
-                SUM(CASE WHEN local_path IS NOT NULL THEN 1 ELSE 0 END) as new_count,
-                SUM(CASE WHEN local_path IS NULL THEN 1 ELSE 0 END) as deduped_count
+                SUM(CASE WHEN status IS NULL OR status != 'skipped' THEN 1 ELSE 0 END) as new_count,
+                SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as deduped_count
             FROM pulled_messages
             {where}
             GROUP BY hour

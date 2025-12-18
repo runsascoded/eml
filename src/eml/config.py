@@ -278,6 +278,27 @@ class PullFailure:
     timestamp: str | None = None
 
 
+def _sanitize_error(error: str) -> str:
+    """Strip nested PullFailure(...) wrappers from error strings.
+
+    This fixes a bug where PullFailure objects were accidentally stringified
+    and stored, creating exponentially growing nested strings.
+    """
+    import re
+    # Keep stripping PullFailure(...) wrappers until we get to the actual error
+    pattern = r"^PullFailure\(uid=\d+,\s*error=['\"](.+)['\"](?:,\s*timestamp=.*)?\)$"
+    max_iterations = 100  # Safety limit
+    for _ in range(max_iterations):
+        # Unescape the string first (handle \\' -> ' etc)
+        unescaped = error.replace("\\'", "'").replace('\\"', '"').replace("\\\\", "\\")
+        match = re.match(pattern, unescaped, re.DOTALL)
+        if match:
+            error = match.group(1)
+        else:
+            break
+    return error
+
+
 def get_failures_path(account: str, folder: str, root: Path | None = None) -> Path:
     """Get path to failures file for an account/folder."""
     root = root or get_eml_root()
@@ -302,13 +323,15 @@ def load_failures(
     failures = {}
     for uid, info in data.items():
         if isinstance(info, dict):
+            error = _sanitize_error(info.get("error", ""))
             failures[int(uid)] = PullFailure(
                 uid=int(uid),
-                error=info.get("error", ""),
+                error=error,
                 timestamp=info.get("timestamp"),
             )
         else:
-            failures[int(uid)] = PullFailure(uid=int(uid), error=str(info))
+            error = _sanitize_error(str(info))
+            failures[int(uid)] = PullFailure(uid=int(uid), error=error)
     return failures
 
 
