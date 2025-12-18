@@ -265,7 +265,10 @@ def pull(
 
                     # Content-hash dedup - check if we already have this exact content
                     local_path: str | None = None
-                    if has_cfg and layout.has_content(raw):
+                    existing_path = layout.get_path_by_content(raw) if has_cfg else None
+                    if existing_path:
+                        # Duplicate - set local_path to existing file
+                        local_path = str(existing_path.relative_to(root))
                         skipped += 1
                         if verbose:
                             print_result("skip", subj)
@@ -355,9 +358,13 @@ def pull(
         # Save failures to disk
         if has_cfg and not dry_run:
             # Convert exception objects to PullFailure objects
+            # (failures dict may contain both Exception objects and PullFailure objects from load_failures)
             failure_records = {}
             for uid, exc in failures.items():
-                failure_records[uid] = PullFailure(uid=uid, error=str(exc))
+                if isinstance(exc, PullFailure):
+                    failure_records[uid] = exc
+                else:
+                    failure_records[uid] = PullFailure(uid=uid, error=str(exc))
             save_failures(account, src_folder, failure_records, root)
 
         echo()

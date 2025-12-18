@@ -509,42 +509,6 @@ def convert(dry_run: bool, delete_old: bool, target_layout: str):
 
 
 # =============================================================================
-# serve
-# =============================================================================
-
-
-@click.command()
-@require_init
-@option('-h', '--host', default="127.0.0.1", help="Host to bind to")
-@option('-p', '--port', default=5000, help="Port to run on")
-def serve(host: str, port: int):
-    """Start pmail web UI for browsing emails.
-
-    \b
-    Examples:
-      eml serve                           # Start on http://127.0.0.1:5000
-      eml s -p 8080                       # Use different port
-    """
-    msgs_path = get_msgs_db_path()
-
-    www_path = Path(__file__).parent.parent.parent / "www"
-    sys.path.insert(0, str(www_path))
-
-    try:
-        from app import app
-        import app as app_module
-        app_module.DB_PATH = msgs_path.absolute()
-
-        echo(f"Starting pmail on http://{host}:{port}")
-        echo(f"Database: {msgs_path}")
-        app.run(host=host, port=port, debug=True)
-    except ImportError as e:
-        err(f"Failed to import pmail app: {e}")
-        err("Make sure www/app.py exists")
-        sys.exit(1)
-
-
-# =============================================================================
 # migrate (legacy)
 # =============================================================================
 

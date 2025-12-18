@@ -302,6 +302,15 @@ class TreeLayout:
         path = hash_index.get(sha)
         return path is not None and path.exists()
 
+    def get_path_by_content(self, raw: bytes) -> Path | None:
+        """Get the path of existing content by hash, or None if not found."""
+        sha = content_hash(raw)
+        _, hash_index = self._get_indices()
+        path = hash_index.get(sha)
+        if path is not None and path.exists():
+            return path
+        return None
+
     def count(self, folder: str | None = None) -> int:
         """Count messages, optionally filtered by folder."""
         if folder:

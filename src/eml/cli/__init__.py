@@ -7,7 +7,7 @@ This package organizes CLI commands into modules:
 - status.py: Status, web dashboard, stats
 - index_cmds.py: Index, backfill, uids, fsck
 - attachments.py: Attachment manipulation
-- misc.py: init, folders, ls, tags, convert, serve, migrate, ingest
+- misc.py: init, folders, ls, tags, convert, migrate, ingest
 - utils.py: Shared utilities and helpers
 """
 
@@ -20,7 +20,7 @@ from .utils import AliasGroup
 from .account import account
 from .attachments import attachments
 from .index_cmds import backfill, fsck, index, uids
-from .misc import convert, folders, init, ingest, ls, migrate, serve, tags
+from .misc import convert, folders, init, ingest, ls, migrate, tags
 from .pull import pull
 from .push import push
 from .status import stats, status, web
@@ -36,7 +36,8 @@ from .status import stats, status, web
     'p': 'pull',
     'ps': 'push',
     'st': 'stats',
-    's': 'serve',
+    's': 'status',
+    'w': 'web',
 })
 def main():
     """Email migration tools."""
@@ -59,7 +60,6 @@ main.add_command(ls)
 main.add_command(migrate)
 main.add_command(pull)
 main.add_command(push)
-main.add_command(serve)
 main.add_command(stats)
 main.add_command(status)
 main.add_command(tags)
@@ -83,7 +83,6 @@ __all__ = [
     'migrate',
     'pull',
     'push',
-    'serve',
     'stats',
     'status',
     'tags',
