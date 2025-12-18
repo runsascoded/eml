@@ -261,6 +261,18 @@ def pull(
                     consecutive_errors += 1
                     if has_cfg and not dry_run:
                         failures[uid_int] = e
+                        # Record failure in pulls.db for activity tracking
+                        if pulls_db:
+                            pulls_db.record_pull(
+                                account=account,
+                                folder=src_folder,
+                                uidvalidity=uidvalidity,
+                                uid=uid_int,
+                                content_hash="",
+                                status="failed",
+                                sync_run_id=sync_run_id,
+                                error_message=str(e),
+                            )
                     if verbose:
                         print_result("fail", f"UID {uid}", str(e))
                     progress.advance(task)
@@ -355,6 +367,22 @@ def pull(
                     consecutive_errors += 1
                     if has_cfg and not dry_run:
                         failures[uid_int] = e
+                        # Record failure in pulls.db for activity tracking
+                        if pulls_db:
+                            msg_date = info.date.isoformat() if info.date else None
+                            pulls_db.record_pull(
+                                account=account,
+                                folder=src_folder,
+                                uidvalidity=uidvalidity,
+                                uid=uid_int,
+                                content_hash="",
+                                message_id=info.message_id or None,
+                                subject=info.subject,
+                                msg_date=msg_date,
+                                status="failed",
+                                sync_run_id=sync_run_id,
+                                error_message=str(e),
+                            )
                     if verbose:
                         print_result("fail", subj, str(e))
 

@@ -50,6 +50,7 @@ class PulledMessage:
     pulled_at: datetime
     status: str | None = None  # 'new', 'skipped', 'failed'
     sync_run_id: int | None = None  # FK to sync_runs
+    error_message: str | None = None  # error message for failed pulls
 
 
 @dataclass
@@ -137,6 +138,11 @@ class PullsDB:
             self.conn.execute("SELECT sync_run_id FROM pulled_messages LIMIT 1")
         except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE pulled_messages ADD COLUMN sync_run_id INTEGER")
+        # Migrate: add error_message column if missing
+        try:
+            self.conn.execute("SELECT error_message FROM pulled_messages LIMIT 1")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE pulled_messages ADD COLUMN error_message TEXT")
 
         self.conn.executescript("""
             -- Sync runs: first-class record of each pull/push operation
@@ -174,6 +180,7 @@ class PullsDB:
                 msg_date TEXT,
                 status TEXT,  -- 'new', 'skipped', 'failed'
                 sync_run_id INTEGER,  -- FK to sync_runs
+                error_message TEXT,  -- error message for failed pulls
                 PRIMARY KEY (account, folder, uidvalidity, uid)
             );
 
@@ -236,31 +243,33 @@ class PullsDB:
         msg_date: str | None = None,
         status: str | None = None,
         sync_run_id: int | None = None,
+        error_message: str | None = None,
     ) -> None:
-        """Record a successfully pulled message.
+        """Record a pulled message (success or failure).
 
         Args:
             account: Account name (e.g., 'y' for Yahoo)
             folder: Folder name (e.g., 'Inbox')
             uidvalidity: IMAP UIDVALIDITY value
             uid: Message UID
-            content_hash: SHA256 of raw message bytes
+            content_hash: SHA256 of raw message bytes (empty string for failures)
             message_id: Message-ID header (optional, for reference)
-            local_path: Path where message was stored (optional, None if deduped)
+            local_path: Path where message was stored (optional, None if deduped or failed)
             pulled_at: When the message was pulled (defaults to now, use file mtime for backfill)
             subject: Email subject (for display)
             msg_date: Original message date (for display)
             status: 'new', 'skipped', or 'failed'
             sync_run_id: FK to sync_runs table
+            error_message: Error message for failed pulls
         """
         ts = (pulled_at or datetime.now()).isoformat()
         self.conn.execute("""
             INSERT OR REPLACE INTO pulled_messages
-                (account, folder, uidvalidity, uid, content_hash, message_id, local_path, pulled_at, subject, msg_date, status, sync_run_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (account, folder, uidvalidity, uid, content_hash, message_id, local_path, pulled_at, subject, msg_date, status, sync_run_id, error_message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             account, folder, uidvalidity, uid, content_hash,
-            message_id, local_path, ts, subject, msg_date, status, sync_run_id
+            message_id, local_path, ts, subject, msg_date, status, sync_run_id, error_message
         ))
         self.conn.commit()
 
@@ -930,7 +939,7 @@ class PullsDB:
 
         cur = self.conn.execute(f"""
             SELECT account, folder, uidvalidity, uid, content_hash, message_id,
-                   local_path, pulled_at, status, sync_run_id, subject, msg_date
+                   local_path, pulled_at, status, sync_run_id, subject, msg_date, error_message
             FROM pulled_messages
             {where}
             ORDER BY pulled_at DESC
@@ -949,6 +958,7 @@ class PullsDB:
                 pulled_at=datetime.fromisoformat(row["pulled_at"]),
                 status=row["status"],
                 sync_run_id=row["sync_run_id"],
+                error_message=row["error_message"],
             )
             for row in cur
         ]

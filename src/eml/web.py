@@ -278,6 +278,7 @@ def api_sync_run_detail(run_id: int, message_status: str | None = None, limit: i
                     "pulled_at": m.pulled_at.isoformat(),
                     "status": m.status,
                     "content_hash": m.content_hash[:16] + "..." if m.content_hash else None,
+                    "error_message": m.error_message,
                 }
                 for m in messages
             ],
