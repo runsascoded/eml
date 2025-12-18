@@ -275,6 +275,7 @@ DASHBOARD_HTML = """
         .badge-new { background: #00d4aa; color: #000; }
         .badge-skip { background: #444; color: #888; }
         .sync-status { padding: 10px; border-radius: 4px; margin-bottom: 20px; }
+        .sync-status code { background: #1a1a2e; padding: 2px 6px; border-radius: 3px; font-family: monospace; }
         .sync-running { background: #0f3460; border: 1px solid #00d4aa; }
         .sync-idle { background: #1a1a2e; border: 1px solid #333; color: #666; }
         .progress-bar { background: #333; height: 8px; border-radius: 4px; margin-top: 5px; }
@@ -379,8 +380,8 @@ DASHBOARD_HTML = """
 
                 syncEl.className = 'sync-status sync-running';
                 syncEl.innerHTML = `
-                    <strong>● ${data.operation} in progress:</strong> ${data.account}/${data.folder}
-                    ${formatNumber(data.completed)}/${formatNumber(data.total)} (${pct}%)${detailsStr}
+                    <strong>● ${data.operation} in progress:</strong> <code>${data.account}/${data.folder}</code>
+                    ${formatNumber(data.completed)} / ${formatNumber(data.total)} (${pct}%)${detailsStr}
                     ${data.current_subject ? `<br><small>Current: ${data.current_subject}</small>` : ''}
                     <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
                 `;

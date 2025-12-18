@@ -31,7 +31,7 @@ dependencies = [
 ]
 
 [project.scripts]
-eml = "eml.cli:main"
+eml = "eml.cli:main"  # cli/ package
 
 [build-system]
 requires = ["hatchling"]
