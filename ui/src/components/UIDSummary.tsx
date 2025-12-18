@@ -28,7 +28,7 @@ export function UIDSummary({ status }: Props) {
         <span className="stat warning">{status.unpulled_uids.toLocaleString()}</span>{' '}
         <span className="stat-label">unpulled</span>
       </div>
-      <div className="stat-label">
+      <div className="no-mid">
         {status.no_message_id.toLocaleString()} without Message-ID
       </div>
     </div>

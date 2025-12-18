@@ -46,7 +46,7 @@ export function Dashboard() {
     <>
       <h1>
         <span className="live-indicator" />
-        EML Pull Status
+        EML Status
       </h1>
       <FolderNav
         folders={folders}
