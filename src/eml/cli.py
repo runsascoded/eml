@@ -1104,6 +1104,7 @@ def pull(
 
                     # Record successful pull in pulls.db (even for dupes - we pulled it)
                     if pulls_db:
+                        msg_date = info.date.isoformat() if info.date else None
                         pulls_db.record_pull(
                             account=account,
                             folder=src_folder,
@@ -1112,6 +1113,8 @@ def pull(
                             content_hash=raw_hash,
                             message_id=info.message_id or None,
                             local_path=local_path,
+                            subject=info.subject,
+                            msg_date=msg_date,
                         )
 
                     # Clear from failures if previously failed
@@ -1821,33 +1824,71 @@ def status(color: bool, folder: tuple[str, ...]):
             pass
     print()
 
-    # Hourly distribution (last 24h) - bucket by wall clock hour
+    # Hourly distribution (last 24h) - prefer pulls.db, fallback to filesystem
     print(f"{BOLD}Downloads by hour (last 24h):{RESET}")
-    hourly = defaultdict(int)
-    cutoff = now - timedelta(hours=24)
-    for mtime, _ in files:
-        if mtime >= cutoff.timestamp():
-            dt = datetime.fromtimestamp(mtime)
-            hour_key = dt.replace(minute=0, second=0, microsecond=0)
-            hourly[hour_key] += 1
+    hourly_data: list[tuple[str, int]] = []
+    pulls_db_path = root / ".eml" / "pulls.db"
+    if pulls_db_path.exists():
+        try:
+            pulls_db = get_pulls_db(root)
+            pulls_db.connect()
+            hourly_data = pulls_db.get_pulls_by_hour(limit_hours=24)
+            pulls_db.disconnect()
+        except Exception:
+            pass
 
-    for hour_key in sorted(hourly.keys()):
-        count = hourly[hour_key]
-        bar = '█' * (count // 50)
-        print(f"  {hour_key:%Y-%m-%d %H}:00  {count:4d} {bar}")
+    if hourly_data:
+        # From pulls.db - data is [(hour_str, count), ...] most recent first
+        for hour_str, count in reversed(hourly_data):
+            bar = '█' * (count // 50)
+            print(f"  {hour_str}  {count:4d} {bar}")
+    else:
+        # Fallback to filesystem mtime
+        hourly = defaultdict(int)
+        cutoff = now - timedelta(hours=24)
+        for mtime, _ in files:
+            if mtime >= cutoff.timestamp():
+                dt = datetime.fromtimestamp(mtime)
+                hour_key = dt.replace(minute=0, second=0, microsecond=0)
+                hourly[hour_key] += 1
+
+        for hour_key in sorted(hourly.keys()):
+            count = hourly[hour_key]
+            bar = '█' * (count // 50)
+            print(f"  {hour_key:%Y-%m-%d %H}:00  {count:4d} {bar}")
     print()
 
-    # Last 10 downloaded (oldest first, most recent at bottom)
+    # Last 10 downloaded (oldest first, most recent at bottom) - prefer pulls.db
     print(f"{BOLD}Last 10 downloaded:{RESET}")
-    files.sort(reverse=True)
-    for mtime, path in reversed(files[:10]):
-        dt = datetime.fromtimestamp(mtime)
-        rel_path = os.path.relpath(path, root)
-        folder = os.path.dirname(rel_path)
-        fname = os.path.basename(path).removesuffix('.eml')
-        if len(fname) > 45:
-            fname = fname[:42] + '...'
-        print(f"  {DIM}{dt:%Y-%m-%d %H:%M:%S}{RESET} {GREEN}{folder}/{RESET}{fname}")
+    recent_pulls: list = []
+    if pulls_db_path.exists():
+        try:
+            pulls_db = get_pulls_db(root)
+            pulls_db.connect()
+            recent_pulls = pulls_db.get_recent_pulls(limit=10, with_path_only=True)
+            pulls_db.disconnect()
+        except Exception:
+            pass
+
+    if recent_pulls:
+        # From pulls.db - data is most recent first, reverse for display
+        for rp in reversed(recent_pulls):
+            folder = os.path.dirname(rp.local_path)
+            fname = os.path.basename(rp.local_path).removesuffix('.eml')
+            if len(fname) > 45:
+                fname = fname[:42] + '...'
+            print(f"  {DIM}{rp.pulled_at:%Y-%m-%d %H:%M:%S}{RESET} {GREEN}{folder}/{RESET}{fname}")
+    else:
+        # Fallback to filesystem mtime
+        files.sort(reverse=True)
+        for mtime, path in reversed(files[:10]):
+            dt = datetime.fromtimestamp(mtime)
+            rel_path = os.path.relpath(path, root)
+            folder = os.path.dirname(rel_path)
+            fname = os.path.basename(path).removesuffix('.eml')
+            if len(fname) > 45:
+                fname = fname[:42] + '...'
+            print(f"  {DIM}{dt:%Y-%m-%d %H:%M:%S}{RESET} {GREEN}{folder}/{RESET}{fname}")
     print()
 
     # Last 10 uploaded (if any)
@@ -1904,6 +1945,38 @@ def status(color: bool, folder: tuple[str, ...]):
             print(f"  {DIM}Current: {current_subject}{RESET}")
     else:
         print(f"{DIM}○ No sync running{RESET}")
+
+
+# ============================================================================
+# web - Status dashboard
+# ============================================================================
+
+@main.command()
+@require_init
+@option('-h', '--host', default="127.0.0.1", help="Host to bind to")
+@option('-p', '--port', default=8765, type=int, help="Port to run on")
+def web(host: str, port: int):
+    """Start status dashboard web UI.
+
+    \b
+    Examples:
+      eml web                    # Start on http://127.0.0.1:8765
+      eml web -p 8080            # Use different port
+      eml web -h 0.0.0.0         # Listen on all interfaces
+
+    The dashboard shows:
+    - UID summary (server/pulled/unpulled)
+    - Hourly download histogram
+    - Recent downloads
+    - Current sync status
+    """
+    try:
+        from .web import main as web_main
+        web_main(host=host, port=port)
+    except ImportError as e:
+        err(f"Failed to import web module: {e}")
+        err("Make sure fastapi and uvicorn are installed: pip install fastapi uvicorn")
+        sys.exit(1)
 
 
 # ============================================================================
@@ -2445,16 +2518,27 @@ def backfill(folder: str, limit: int | None, dry_run: bool, verbose: bool, accou
         uids_without_mid = len(all_uids) - len(server_msg_ids)
         if uids_without_mid > 0:
             echo(f"  {uids_without_mid:,} UIDs have no Message-ID")
+
+        # Record server UIDs in pulls.db (so we know what the server has)
+        if not dry_run:
+            pulls_db = get_pulls_db(root)
+            pulls_db.connect()
+            # Build list of (uid, message_id) tuples
+            uid_mids = [(int(u), server_msg_ids.get(int(u))) for u in all_uids]
+            pulls_db.record_server_uids(account, folder, uidvalidity, uid_mids)
+            pulls_db.record_server_folder(account, folder, uidvalidity, msg_count)
+            echo(f"  Recorded {len(uid_mids):,} server UIDs in pulls.db")
+            pulls_db.disconnect()
         echo()
 
         # Open index.db and pulls.db
         with FileIndex(eml_dir) as idx:
-            # Build message_id -> (content_hash, path) mapping from index
+            # Build message_id -> (content_hash, path, mtime) mapping from index
             echo("Loading local index...")
-            local_by_mid: dict[str, tuple[str, str]] = {}
+            local_by_mid: dict[str, tuple[str, str, float]] = {}
             for f in idx.iter_files():
                 if f.message_id:
-                    local_by_mid[f.message_id] = (f.content_hash, f.path)
+                    local_by_mid[f.message_id] = (f.content_hash, f.path, f.mtime)
             echo(f"  {len(local_by_mid):,} local files with Message-ID")
             echo()
 
@@ -2511,14 +2595,15 @@ def backfill(folder: str, limit: int | None, dry_run: bool, verbose: bool, accou
                             console.print(f"  [red]✗[/] UID {uid}: not in local index")
                         continue
 
-                    content_hash, local_path = local_info
+                    content_hash, local_path, mtime = local_info
                     matched += 1
 
                     if verbose:
                         console.print(f"  [green]✓[/] UID {uid} → {local_path[:50]}...")
 
-                    # Record in pulls.db
+                    # Record in pulls.db with file mtime as pulled_at
                     if not dry_run:
+                        pulled_at = datetime.fromtimestamp(mtime) if mtime else None
                         pulls_db.record_pull(
                             account=account,
                             folder=folder,
@@ -2527,6 +2612,7 @@ def backfill(folder: str, limit: int | None, dry_run: bool, verbose: bool, accou
                             content_hash=content_hash,
                             message_id=mid,
                             local_path=local_path,
+                            pulled_at=pulled_at,
                         )
 
             if not dry_run:
@@ -2557,6 +2643,135 @@ def backfill(folder: str, limit: int | None, dry_run: bool, verbose: bool, accou
         sys.exit(1)
     finally:
         client.disconnect()
+
+
+# ============================================================================
+# uids - Query UID sets from pulls.db
+# ============================================================================
+
+@main.command(no_args_is_help=True)
+@require_init
+@option('-f', '--folder', default="Inbox", help="IMAP folder")
+@option('-j', '--json', 'output_json', is_flag=True, help="Output as JSON")
+@option('-l', '--limit', type=int, help="Limit output")
+@option('--no-mid', is_flag=True, help="Show UIDs without Message-ID")
+@option('--pulled', is_flag=True, help="Show pulled UIDs")
+@option('--server', is_flag=True, help="Show server UIDs (from last backfill)")
+@option('--unpulled', is_flag=True, help="Show server UIDs not yet pulled")
+@argument('account')
+def uids(
+    folder: str,
+    output_json: bool,
+    limit: int | None,
+    no_mid: bool,
+    pulled: bool,
+    server: bool,
+    unpulled: bool,
+    account: str,
+):
+    """Query UID sets from pulls.db.
+
+    \b
+    Examples:
+      eml uids y --server             # Show all server UIDs
+      eml uids y --unpulled           # Show UIDs needing pull
+      eml uids y --no-mid             # Show UIDs without Message-ID
+      eml uids y --pulled -l 20       # Show last 20 pulled UIDs
+
+    Requires backfill to have been run first (to populate server_uids).
+    """
+    import json as json_module
+
+    root = get_eml_root()
+    pulls_db_path = root / ".eml" / "pulls.db"
+    if not pulls_db_path.exists():
+        err("No pulls.db found. Run 'eml backfill' first.")
+        sys.exit(1)
+
+    # Need UIDVALIDITY - get from pulls.db
+    pulls_db = get_pulls_db(root)
+    pulls_db.connect()
+
+    uidvalidity = pulls_db.get_uidvalidity(account, folder)
+    if not uidvalidity:
+        # Try server_folders table
+        cur = pulls_db.conn.execute("""
+            SELECT uidvalidity FROM server_folders
+            WHERE account = ? AND folder = ?
+        """, (account, folder))
+        row = cur.fetchone()
+        if row:
+            uidvalidity = row["uidvalidity"]
+        else:
+            err(f"No UIDVALIDITY found for {account}/{folder}. Run backfill first.")
+            pulls_db.disconnect()
+            sys.exit(1)
+
+    result_uids: set[int] = set()
+    query_name = ""
+
+    if no_mid:
+        result_uids = pulls_db.get_uids_without_message_id(account, folder, uidvalidity)
+        query_name = "UIDs without Message-ID"
+    elif unpulled:
+        result_uids = pulls_db.get_unpulled_uids(account, folder, uidvalidity)
+        query_name = "Unpulled UIDs (on server, not pulled)"
+    elif server:
+        result_uids = pulls_db.get_server_uids(account, folder, uidvalidity)
+        query_name = "Server UIDs"
+    elif pulled:
+        result_uids = pulls_db.get_pulled_uids(account, folder, uidvalidity)
+        query_name = "Pulled UIDs"
+    else:
+        # Default: show summary
+        server_count = pulls_db.get_server_uid_count(account, folder)
+        pulled_count = pulls_db.get_pulled_count(account, folder, uidvalidity)
+        unpulled_uids = pulls_db.get_unpulled_uids(account, folder, uidvalidity)
+        no_mid_uids = pulls_db.get_uids_without_message_id(account, folder, uidvalidity)
+
+        if output_json:
+            print(json_module.dumps({
+                "account": account,
+                "folder": folder,
+                "uidvalidity": uidvalidity,
+                "server_uids": server_count,
+                "pulled_uids": pulled_count,
+                "unpulled_uids": len(unpulled_uids),
+                "no_message_id": len(no_mid_uids),
+            }, indent=2))
+        else:
+            echo(f"Account: {account}")
+            echo(f"Folder: {folder}")
+            echo(f"UIDVALIDITY: {uidvalidity}")
+            echo()
+            echo(f"Server UIDs:    {server_count:,}")
+            echo(f"Pulled UIDs:    {pulled_count:,}")
+            echo(f"Unpulled UIDs:  {len(unpulled_uids):,}")
+            echo(f"No Message-ID:  {len(no_mid_uids):,}")
+        pulls_db.disconnect()
+        return
+
+    pulls_db.disconnect()
+
+    # Output
+    uid_list = sorted(result_uids)
+    if limit:
+        uid_list = uid_list[:limit]
+
+    if output_json:
+        print(json_module.dumps({
+            "query": query_name,
+            "count": len(result_uids),
+            "uids": uid_list,
+        }, indent=2))
+    else:
+        echo(f"{query_name}: {len(result_uids):,}")
+        if uid_list:
+            echo()
+            for uid in uid_list:
+                echo(f"  {uid}")
+            if limit and len(result_uids) > limit:
+                echo(f"  ... and {len(result_uids) - limit:,} more")
 
 
 # ============================================================================
