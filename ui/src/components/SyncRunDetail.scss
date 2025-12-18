@@ -205,6 +205,12 @@
         .no-path {
           color: var(--color-text-muted);
         }
+
+        .error-text {
+          color: var(--color-error);
+          font-size: 0.85rem;
+          word-break: break-all;
+        }
       }
 
       .status-pill {

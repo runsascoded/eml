@@ -75,6 +75,7 @@ export interface SyncRunMessage {
   pulled_at: string
   status: string | null
   content_hash: string | null
+  error_message: string | null
 }
 
 export interface FolderDetail {

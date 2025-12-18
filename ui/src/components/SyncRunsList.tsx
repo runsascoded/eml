@@ -45,14 +45,14 @@ export function SyncRunsList({ runs, compact = false }: Props) {
         <Link key={run.id} to={`/sync/${run.id}`} className="sync-run-item">
           <div className="run-header">
             <span className="operation">{run.operation}</span>
-            <span className="folder">{run.account}/{run.folder}</span>
+            <code className="folder">{run.account}/{run.folder}</code>
             <StatusBadge status={run.status} />
           </div>
           <div className="run-stats">
-            <span className="stat new">{run.fetched} new</span>
-            <span className="stat skipped">{run.skipped} skipped</span>
-            {run.failed > 0 && <span className="stat failed">{run.failed} failed</span>}
-            <span className="stat total">/ {run.total} total</span>
+            <span className="stat new">{run.fetched.toLocaleString()} new</span>
+            <span className="stat skipped">{run.skipped.toLocaleString()} skipped</span>
+            {run.failed > 0 && <span className="stat failed">{run.failed.toLocaleString()} failed</span>}
+            <span className="stat total">/ {run.total.toLocaleString()} total</span>
           </div>
           <div className="run-time">
             <span className="time">{formatTime(run.started_at)}</span>

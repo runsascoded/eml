@@ -44,7 +44,7 @@ export function SyncRunDetail() {
       <header className="run-header">
         <h1>
           <span className="operation">{run.operation}</span>
-          <span className="folder">{run.account}/{run.folder}</span>
+          <code className="folder">{run.account}/{run.folder}</code>
           <span className={`status-badge status-${run.status}`}>{run.status}</span>
         </h1>
       </header>
@@ -97,7 +97,7 @@ export function SyncRunDetail() {
               <tr>
                 <th>UID</th>
                 <th>Status</th>
-                <th>Path</th>
+                <th>Path / Error</th>
                 <th>Time</th>
               </tr>
             </thead>
@@ -111,7 +111,9 @@ export function SyncRunDetail() {
                     </span>
                   </td>
                   <td className="path">
-                    {m.local_path ? (
+                    {m.status === 'failed' && m.error_message ? (
+                      <span className="error-text">{m.error_message}</span>
+                    ) : m.local_path ? (
                       <Link to={`/email/${m.local_path}`}>{m.local_path}</Link>
                     ) : (
                       <span className="no-path">-</span>

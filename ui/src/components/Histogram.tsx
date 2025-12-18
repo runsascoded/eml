@@ -28,8 +28,8 @@ export function Histogram({ data }: Props) {
       <div className="bar-chart">
         {data.data.map((d) => {
           const total = d.new + d.deduped
-          const newWidth = (d.new / maxCount) * 200
-          const dedupedWidth = (d.deduped / maxCount) * 200
+          const newPct = (d.new / maxCount) * 100
+          const dedupedPct = (d.deduped / maxCount) * 100
           const tooltipText = `${d.new.toLocaleString()} new, ${d.deduped.toLocaleString()} deduped`
           return (
             <div key={d.hour} className="bar-row">
@@ -40,13 +40,13 @@ export function Histogram({ data }: Props) {
                   {d.new > 0 && (
                     <div
                       className="bar bar-new"
-                      style={{ width: newWidth }}
+                      style={{ width: `${newPct}%` }}
                     />
                   )}
                   {d.deduped > 0 && (
                     <div
                       className="bar bar-deduped"
-                      style={{ width: dedupedWidth }}
+                      style={{ width: `${dedupedPct}%` }}
                     />
                   )}
                 </div>

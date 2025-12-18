@@ -41,7 +41,9 @@
 }
 
 .bar-label {
-  width: 140px;
+  min-width: 125px;
+  flex-shrink: 0;
+  white-space: nowrap;
   color: var(--text-secondary);
 }
 
@@ -53,6 +55,8 @@
 
 .bar-container {
   display: flex;
+  flex: 1;
+  min-width: 0;
   height: 18px;
 }
 
