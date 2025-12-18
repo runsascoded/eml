@@ -1,0 +1,11 @@
+@use '../styles/variables' as *;
+
+.uid-summary {
+  &.error {
+    color: var(--error);
+  }
+
+  .stat.warning {
+    color: var(--warning);
+  }
+}

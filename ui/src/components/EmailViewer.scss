@@ -1,0 +1,92 @@
+@use '../styles/variables' as *;
+
+.email-viewer {
+  max-width: 900px;
+  margin: 0 auto;
+
+  .back-link {
+    display: inline-block;
+    margin-bottom: $spacing-lg;
+    color: var(--accent);
+
+    &:hover {
+      text-decoration: underline;
+    }
+  }
+
+  .error {
+    color: var(--error);
+    font-size: $font-size-lg;
+    padding: $spacing-lg;
+    background: var(--bg-secondary);
+    border-radius: $radius-lg;
+    border: 1px solid var(--border-color);
+  }
+
+  .header {
+    background: var(--bg-secondary);
+    border-radius: $radius-lg;
+    padding: $spacing-lg;
+    margin-bottom: $spacing-lg;
+    border: 1px solid var(--border-color);
+
+    .subject {
+      font-size: 1.4em;
+      color: var(--accent);
+      margin-bottom: $spacing-md;
+    }
+
+    .meta {
+      color: var(--text-secondary);
+      font-size: 0.9em;
+      line-height: 1.6;
+
+      strong {
+        color: var(--text-primary);
+        opacity: 0.8;
+      }
+    }
+  }
+
+  .body {
+    background: var(--email-body-bg);
+    color: var(--email-body-text);
+    border-radius: $radius-lg;
+    padding: $spacing-lg;
+    min-height: 200px;
+
+    pre {
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      font-family: inherit;
+      margin: 0;
+    }
+  }
+
+  .attachments {
+    background: var(--bg-secondary);
+    border-radius: $radius-lg;
+    padding: $spacing-md;
+    margin-top: $spacing-lg;
+    border: 1px solid var(--border-color);
+
+    h3 {
+      margin-top: 0;
+      color: var(--accent);
+      font-size: 1em;
+    }
+
+    .attachment {
+      color: var(--text-secondary);
+      font-size: 0.9em;
+      padding: $spacing-xs 0;
+    }
+  }
+
+  .path {
+    color: var(--text-muted);
+    font-size: $font-size-xs;
+    margin-top: $spacing-md;
+    word-break: break-all;
+  }
+}

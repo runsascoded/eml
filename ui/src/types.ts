@@ -1,0 +1,108 @@
+export interface Folder {
+  account: string
+  folder: string
+  count: number
+}
+
+export interface PullActivity {
+  uid: number
+  folder: string
+  path: string | null
+  pulled_at: string
+  is_new: boolean
+  subject: string | null
+  msg_date: string | null
+}
+
+export interface UIDStatus {
+  account: string
+  folder: string
+  uidvalidity: number
+  server_uids: number
+  pulled_uids: number
+  unpulled_uids: number
+  no_message_id: number
+  timestamp: string
+  error?: string
+}
+
+export interface SyncStatus {
+  running: boolean
+  operation?: string
+  account?: string
+  folder?: string
+  total?: number
+  completed?: number
+  skipped?: number
+  failed?: number
+  current_subject?: string
+  started?: string
+  pid?: number
+  error?: string
+}
+
+export interface HistogramEntry {
+  hour: string
+  new: number
+  deduped: number
+}
+
+export interface HistogramData {
+  hours: number
+  data: HistogramEntry[]
+}
+
+export interface SyncRun {
+  id: number
+  operation: string
+  account: string
+  folder: string
+  started_at: string
+  ended_at: string | null
+  status: string
+  total: number
+  fetched: number
+  skipped: number
+  failed: number
+  error_message: string | null
+}
+
+export interface SyncRunMessage {
+  uid: number
+  folder: string
+  message_id: string | null
+  local_path: string | null
+  pulled_at: string
+  status: string | null
+  content_hash: string | null
+}
+
+export interface FolderDetail {
+  account: string
+  folder: string
+  uidvalidity: number | null
+  server_uids: number
+  pulled_uids: number
+  messages: PullActivity[]
+  sync_runs: SyncRun[]
+}
+
+export interface EmailAttachment {
+  filename: string
+  content_type: string
+  size: number
+}
+
+export interface EmailData {
+  path: string
+  headers: {
+    from: string
+    to: string
+    cc: string
+    date: string
+    subject: string
+  }
+  body_html: string
+  body_plain: string
+  attachments: EmailAttachment[]
+}

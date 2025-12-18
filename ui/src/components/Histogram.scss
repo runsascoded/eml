@@ -1,0 +1,71 @@
+@use '../styles/variables' as *;
+
+.histogram {
+  .bar-legend {
+    display: flex;
+    gap: $spacing-md;
+    margin-bottom: $spacing-sm;
+    font-size: $font-size-xs;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: $spacing-xs;
+  }
+
+  .legend-color {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+
+    &.new {
+      background: var(--accent);
+    }
+
+    &.deduped {
+      background: var(--accent-secondary);
+    }
+  }
+}
+
+.bar-chart {
+  margin-top: $spacing-sm;
+}
+
+.bar-row {
+  display: flex;
+  align-items: center;
+  margin: 2px 0;
+  font-size: $font-size-sm;
+}
+
+.bar-label {
+  width: 140px;
+  color: var(--text-secondary);
+}
+
+.bar-value {
+  width: 50px;
+  text-align: right;
+  margin-right: $spacing-sm;
+}
+
+.bar-container {
+  display: flex;
+  height: 18px;
+}
+
+.bar {
+  height: 18px;
+}
+
+.bar-new {
+  background: var(--accent);
+  border-radius: 2px 0 0 2px;
+}
+
+.bar-deduped {
+  background: var(--accent-secondary);
+  border-radius: 0 2px 2px 0;
+}

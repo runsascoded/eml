@@ -1,0 +1,91 @@
+// CSS Variables for theming
+:root {
+  --bg-primary: #f5f7fa;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #e8f0f8;
+  --border-color: #d0d7de;
+
+  --text-primary: #1f2328;
+  --text-secondary: #656d76;
+  --text-muted: #8b949e;
+
+  --accent: #0969da;
+  --accent-secondary: #6e7781;
+  --warning: #d29922;
+  --error: #cf222e;
+  --success: #1a7f37;
+
+  --badge-skip-bg: #e8e8e8;
+  --badge-skip-text: #656d76;
+  --progress-bar-bg: #d0d7de;
+  --email-body-bg: #ffffff;
+  --email-body-text: #1f2328;
+
+  --shadow: rgba(31, 35, 40, 0.12);
+
+  // Semantic color aliases
+  --color-surface: var(--bg-secondary);
+  --color-surface-hover: var(--bg-tertiary);
+  --color-border: var(--border-color);
+  --color-text-muted: var(--text-muted);
+  --color-primary: var(--accent);
+  --color-success: var(--success);
+  --color-success-bg: #ddf4e4;
+  --color-warning: var(--warning);
+  --color-warning-bg: #fef3cd;
+  --color-error: var(--error);
+  --color-error-bg: #ffebe9;
+}
+
+[data-theme="dark"] {
+  --bg-primary: #1a1a1a;
+  --bg-secondary: #252525;
+  --bg-tertiary: #333333;
+  --border-color: #444444;
+
+  --text-primary: #ffffff;
+  --text-secondary: #cccccc;
+  --text-muted: #999999;
+
+  --accent: #6cb6ff;
+  --accent-secondary: #aaaaaa;
+  --warning: #f0c040;
+  --error: #ff6b6b;
+  --success: #3fb950;
+
+  --badge-skip-bg: #444444;
+  --badge-skip-text: #cccccc;
+  --progress-bar-bg: #444444;
+  --email-body-bg: #f6f8fa;
+  --email-body-text: #1f2328;
+
+  --shadow: rgba(0, 0, 0, 0.4);
+
+  // Dark theme overrides for semantic colors
+  --color-success-bg: #1c3d2a;
+  --color-warning-bg: #3d3520;
+  --color-error-bg: #3d2020;
+}
+
+// Typography (keep as SCSS for compile-time)
+$font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+$font-size-base: 16px;
+$font-size-sm: 0.875em;
+$font-size-xs: 0.8125em;
+$font-size-lg: 1.125em;
+$font-size-xl: 2em;
+
+// Spacing
+$spacing-xs: 5px;
+$spacing-sm: 10px;
+$spacing-md: 15px;
+$spacing-lg: 20px;
+
+// Border radius
+$radius-sm: 3px;
+$radius-md: 4px;
+$radius-lg: 8px;
+
+// Transitions
+$transition-fast: 0.2s ease;
+$transition-normal: 0.3s ease;

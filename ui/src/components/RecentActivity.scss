@@ -1,0 +1,54 @@
+@use '../styles/variables' as *;
+
+.recent-list {
+  font-size: $font-size-sm;
+  max-height: 600px;
+  overflow-y: auto;
+
+  &.empty {
+    color: var(--text-muted);
+  }
+}
+
+.recent-item {
+  padding: $spacing-xs 0;
+  border-bottom: 1px solid var(--border-color);
+
+  &.skipped {
+    opacity: 0.7;
+  }
+}
+
+.recent-time {
+  color: var(--text-secondary);
+}
+
+.recent-badge {
+  font-size: 0.7em;
+  padding: 2px 6px;
+  border-radius: $radius-sm;
+  margin-left: $spacing-xs;
+}
+
+.badge-new {
+  background: var(--accent);
+  color: #fff;
+}
+
+.badge-skip {
+  background: var(--badge-skip-bg);
+  color: var(--badge-skip-text);
+}
+
+.msg-date {
+  color: var(--text-secondary);
+  margin-left: $spacing-sm;
+}
+
+.subject-link {
+  color: var(--accent);
+}
+
+.subject-text {
+  color: var(--text-muted);
+}

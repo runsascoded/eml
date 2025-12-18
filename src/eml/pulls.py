@@ -21,6 +21,23 @@ PULLS_DB = "pulls.db"
 
 
 @dataclass
+class SyncRun:
+    """Record of a sync operation (pull or push command)."""
+    id: int
+    operation: str  # 'pull' or 'push'
+    account: str
+    folder: str
+    started_at: datetime
+    ended_at: datetime | None
+    status: str  # 'running', 'completed', 'aborted', 'failed'
+    total: int  # total messages to process
+    fetched: int  # new messages fetched
+    skipped: int  # duplicates skipped
+    failed: int  # failures
+    error_message: str | None  # if aborted/failed, why
+
+
+@dataclass
 class PulledMessage:
     """Record of a successfully pulled message."""
     account: str
@@ -31,6 +48,8 @@ class PulledMessage:
     message_id: str | None
     local_path: str | None
     pulled_at: datetime
+    status: str | None = None  # 'new', 'skipped', 'failed'
+    sync_run_id: int | None = None  # FK to sync_runs
 
 
 @dataclass
@@ -108,8 +127,39 @@ class PullsDB:
             self.conn.execute("SELECT msg_date FROM pulled_messages LIMIT 1")
         except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE pulled_messages ADD COLUMN msg_date TEXT")
+        # Migrate: add status and sync_run_id columns if missing
+        try:
+            self.conn.execute("SELECT status FROM pulled_messages LIMIT 1")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE pulled_messages ADD COLUMN status TEXT")
+        try:
+            self.conn.execute("SELECT sync_run_id FROM pulled_messages LIMIT 1")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE pulled_messages ADD COLUMN sync_run_id INTEGER")
 
         self.conn.executescript("""
+            -- Sync runs: first-class record of each pull/push operation
+            CREATE TABLE IF NOT EXISTS sync_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                operation TEXT NOT NULL,  -- 'pull' or 'push'
+                account TEXT NOT NULL,
+                folder TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                status TEXT NOT NULL DEFAULT 'running',  -- 'running', 'completed', 'aborted', 'failed'
+                total INTEGER DEFAULT 0,
+                fetched INTEGER DEFAULT 0,
+                skipped INTEGER DEFAULT 0,
+                failed INTEGER DEFAULT 0,
+                error_message TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sync_runs_started
+                ON sync_runs(started_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_sync_runs_account_folder
+                ON sync_runs(account, folder);
+
             CREATE TABLE IF NOT EXISTS pulled_messages (
                 account TEXT NOT NULL,
                 folder TEXT NOT NULL,
@@ -121,6 +171,8 @@ class PullsDB:
                 pulled_at TEXT NOT NULL,
                 subject TEXT,
                 msg_date TEXT,
+                status TEXT,  -- 'new', 'skipped', 'failed'
+                sync_run_id INTEGER,  -- FK to sync_runs
                 PRIMARY KEY (account, folder, uidvalidity, uid)
             );
 
@@ -181,6 +233,8 @@ class PullsDB:
         pulled_at: datetime | None = None,
         subject: str | None = None,
         msg_date: str | None = None,
+        status: str | None = None,
+        sync_run_id: int | None = None,
     ) -> None:
         """Record a successfully pulled message.
 
@@ -195,15 +249,17 @@ class PullsDB:
             pulled_at: When the message was pulled (defaults to now, use file mtime for backfill)
             subject: Email subject (for display)
             msg_date: Original message date (for display)
+            status: 'new', 'skipped', or 'failed'
+            sync_run_id: FK to sync_runs table
         """
         ts = (pulled_at or datetime.now()).isoformat()
         self.conn.execute("""
             INSERT OR REPLACE INTO pulled_messages
-                (account, folder, uidvalidity, uid, content_hash, message_id, local_path, pulled_at, subject, msg_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (account, folder, uidvalidity, uid, content_hash, message_id, local_path, pulled_at, subject, msg_date, status, sync_run_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             account, folder, uidvalidity, uid, content_hash,
-            message_id, local_path, ts, subject, msg_date
+            message_id, local_path, ts, subject, msg_date, status, sync_run_id
         ))
         self.conn.commit()
 
@@ -669,6 +725,231 @@ class PullsDB:
             """, (account, folder))
         self.conn.commit()
         return cur.rowcount
+
+    # -------------------------------------------------------------------------
+    # Sync runs - first-class tracking of pull/push operations
+    # -------------------------------------------------------------------------
+
+    def start_sync_run(
+        self,
+        operation: str,
+        account: str,
+        folder: str,
+        total: int = 0,
+    ) -> int:
+        """Start a new sync run and return its ID.
+
+        Args:
+            operation: 'pull' or 'push'
+            account: Account name
+            folder: Folder name
+            total: Total messages to process
+
+        Returns:
+            Sync run ID
+        """
+        now = datetime.now().isoformat()
+        cur = self.conn.execute("""
+            INSERT INTO sync_runs (operation, account, folder, started_at, status, total)
+            VALUES (?, ?, ?, ?, 'running', ?)
+        """, (operation, account, folder, now, total))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def update_sync_run(
+        self,
+        sync_run_id: int,
+        total: int | None = None,
+        fetched: int | None = None,
+        skipped: int | None = None,
+        failed: int | None = None,
+    ) -> None:
+        """Update sync run progress.
+
+        Args:
+            sync_run_id: Sync run ID
+            total: Total messages (if updated)
+            fetched: New messages fetched
+            skipped: Duplicates skipped
+            failed: Failures
+        """
+        updates = []
+        params = []
+        if total is not None:
+            updates.append("total = ?")
+            params.append(total)
+        if fetched is not None:
+            updates.append("fetched = ?")
+            params.append(fetched)
+        if skipped is not None:
+            updates.append("skipped = ?")
+            params.append(skipped)
+        if failed is not None:
+            updates.append("failed = ?")
+            params.append(failed)
+
+        if updates:
+            params.append(sync_run_id)
+            self.conn.execute(f"""
+                UPDATE sync_runs SET {', '.join(updates)} WHERE id = ?
+            """, params)
+            self.conn.commit()
+
+    def end_sync_run(
+        self,
+        sync_run_id: int,
+        status: str,
+        error_message: str | None = None,
+    ) -> None:
+        """End a sync run.
+
+        Args:
+            sync_run_id: Sync run ID
+            status: Final status ('completed', 'aborted', 'failed')
+            error_message: Error message if aborted/failed
+        """
+        now = datetime.now().isoformat()
+        self.conn.execute("""
+            UPDATE sync_runs
+            SET ended_at = ?, status = ?, error_message = ?
+            WHERE id = ?
+        """, (now, status, error_message, sync_run_id))
+        self.conn.commit()
+
+    def get_sync_run(self, sync_run_id: int) -> SyncRun | None:
+        """Get a sync run by ID."""
+        cur = self.conn.execute("""
+            SELECT id, operation, account, folder, started_at, ended_at,
+                   status, total, fetched, skipped, failed, error_message
+            FROM sync_runs WHERE id = ?
+        """, (sync_run_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return SyncRun(
+            id=row["id"],
+            operation=row["operation"],
+            account=row["account"],
+            folder=row["folder"],
+            started_at=datetime.fromisoformat(row["started_at"]),
+            ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None,
+            status=row["status"],
+            total=row["total"] or 0,
+            fetched=row["fetched"] or 0,
+            skipped=row["skipped"] or 0,
+            failed=row["failed"] or 0,
+            error_message=row["error_message"],
+        )
+
+    def get_recent_sync_runs(
+        self,
+        limit: int = 20,
+        account: str | None = None,
+        folder: str | None = None,
+        operation: str | None = None,
+    ) -> list[SyncRun]:
+        """Get recent sync runs.
+
+        Args:
+            limit: Max number to return
+            account: Optional account filter
+            folder: Optional folder filter
+            operation: Optional operation filter ('pull' or 'push')
+
+        Returns:
+            List of SyncRun objects, most recent first
+        """
+        conditions = []
+        params: list = []
+        if account:
+            conditions.append("account = ?")
+            params.append(account)
+        if folder:
+            conditions.append("folder = ?")
+            params.append(folder)
+        if operation:
+            conditions.append("operation = ?")
+            params.append(operation)
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.append(limit)
+
+        cur = self.conn.execute(f"""
+            SELECT id, operation, account, folder, started_at, ended_at,
+                   status, total, fetched, skipped, failed, error_message
+            FROM sync_runs
+            {where}
+            ORDER BY started_at DESC
+            LIMIT ?
+        """, params)
+
+        return [
+            SyncRun(
+                id=row["id"],
+                operation=row["operation"],
+                account=row["account"],
+                folder=row["folder"],
+                started_at=datetime.fromisoformat(row["started_at"]),
+                ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None,
+                status=row["status"],
+                total=row["total"] or 0,
+                fetched=row["fetched"] or 0,
+                skipped=row["skipped"] or 0,
+                failed=row["failed"] or 0,
+                error_message=row["error_message"],
+            )
+            for row in cur
+        ]
+
+    def get_sync_run_messages(
+        self,
+        sync_run_id: int,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[PulledMessage]:
+        """Get messages for a sync run.
+
+        Args:
+            sync_run_id: Sync run ID
+            status: Optional status filter ('new', 'skipped', 'failed')
+            limit: Max number to return
+
+        Returns:
+            List of PulledMessage objects
+        """
+        conditions = ["sync_run_id = ?"]
+        params: list = [sync_run_id]
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+
+        where = f"WHERE {' AND '.join(conditions)}"
+        params.append(limit)
+
+        cur = self.conn.execute(f"""
+            SELECT account, folder, uidvalidity, uid, content_hash, message_id,
+                   local_path, pulled_at, status, sync_run_id, subject, msg_date
+            FROM pulled_messages
+            {where}
+            ORDER BY pulled_at DESC
+            LIMIT ?
+        """, params)
+
+        return [
+            PulledMessage(
+                account=row["account"],
+                folder=row["folder"],
+                uidvalidity=row["uidvalidity"],
+                uid=row["uid"],
+                content_hash=row["content_hash"],
+                message_id=row["message_id"],
+                local_path=row["local_path"],
+                pulled_at=datetime.fromisoformat(row["pulled_at"]),
+                status=row["status"],
+                sync_run_id=row["sync_run_id"],
+            )
+            for row in cur
+        ]
 
 
 def get_pulls_db(root: Path | None = None) -> PullsDB:

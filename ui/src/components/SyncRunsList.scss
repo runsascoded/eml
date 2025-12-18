@@ -1,0 +1,124 @@
+.sync-runs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  &.empty {
+    color: var(--color-text-muted);
+    padding: 16px;
+    text-align: center;
+  }
+
+  &.compact .sync-run-item {
+    padding: 8px 12px;
+
+    .run-header {
+      font-size: 0.85rem;
+    }
+
+    .run-stats {
+      font-size: 0.75rem;
+    }
+
+    .run-time {
+      font-size: 0.7rem;
+    }
+  }
+}
+
+.sync-run-item {
+  display: block;
+  padding: 12px 16px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.2s, background-color 0.2s;
+
+  &:hover {
+    border-color: var(--color-primary);
+    background: var(--color-surface-hover);
+  }
+
+  .run-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+
+    .operation {
+      font-weight: 600;
+      text-transform: capitalize;
+    }
+
+    .folder {
+      color: var(--color-text-muted);
+      font-size: 0.9em;
+    }
+  }
+
+  .run-stats {
+    display: flex;
+    gap: 12px;
+    font-size: 0.85rem;
+    margin-bottom: 4px;
+
+    .stat {
+      &.new {
+        color: var(--color-success);
+      }
+
+      &.skipped {
+        color: var(--color-text-muted);
+      }
+
+      &.failed {
+        color: var(--color-error);
+      }
+
+      &.total {
+        color: var(--color-text-muted);
+      }
+    }
+  }
+
+  .run-time {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+
+    .duration {
+      font-family: monospace;
+    }
+  }
+}
+
+.status-badge {
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  text-transform: uppercase;
+
+  &.status-completed {
+    background: var(--color-success-bg);
+    color: var(--color-success);
+  }
+
+  &.status-running {
+    background: var(--color-warning-bg);
+    color: var(--color-warning);
+  }
+
+  &.status-aborted {
+    background: var(--color-warning-bg);
+    color: var(--color-warning);
+  }
+
+  &.status-failed {
+    background: var(--color-error-bg);
+    color: var(--color-error);
+  }
+}

@@ -1,0 +1,44 @@
+@use '../styles/variables' as *;
+
+.folder-nav {
+  display: flex;
+  gap: $spacing-sm;
+  margin-bottom: $spacing-md;
+  flex-wrap: wrap;
+}
+
+.no-folders {
+  color: var(--text-muted);
+}
+
+.folder-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: $spacing-xs 12px;
+  border-radius: $radius-md;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: $font-size-sm;
+  font-family: inherit;
+  transition: all 0.2s ease;
+  text-decoration: none;
+
+  &:hover {
+    border-color: var(--accent);
+    color: var(--text-primary);
+  }
+
+  &.active {
+    background: var(--bg-tertiary);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+}
+
+.folder-count {
+  font-size: $font-size-xs;
+  color: var(--text-muted);
+  margin-left: $spacing-xs;
+}

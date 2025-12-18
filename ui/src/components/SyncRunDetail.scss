@@ -1,0 +1,239 @@
+.sync-run-detail {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+
+  &.loading, &.not-found {
+    text-align: center;
+    padding: 60px 20px;
+  }
+
+  .breadcrumb {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 20px;
+    font-size: 0.9rem;
+
+    a {
+      color: var(--color-primary);
+      text-decoration: none;
+
+      &:hover {
+        text-decoration: underline;
+      }
+    }
+
+    span {
+      color: var(--color-text-muted);
+    }
+  }
+
+  .run-header {
+    margin-bottom: 24px;
+
+    h1 {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+
+      .operation {
+        text-transform: capitalize;
+      }
+
+      .folder {
+        color: var(--color-text-muted);
+        font-weight: 400;
+      }
+    }
+  }
+
+  .status-badge {
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    text-transform: uppercase;
+
+    &.status-completed {
+      background: var(--color-success-bg);
+      color: var(--color-success);
+    }
+
+    &.status-running {
+      background: var(--color-warning-bg);
+      color: var(--color-warning);
+    }
+
+    &.status-aborted {
+      background: var(--color-warning-bg);
+      color: var(--color-warning);
+    }
+
+    &.status-failed {
+      background: var(--color-error-bg);
+      color: var(--color-error);
+    }
+  }
+
+  .run-info {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 24px;
+
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 20px;
+      margin-bottom: 20px;
+
+      .info-item {
+        label {
+          display: block;
+          font-size: 0.8rem;
+          color: var(--color-text-muted);
+          margin-bottom: 4px;
+        }
+
+        span {
+          font-size: 1.1rem;
+        }
+      }
+    }
+
+    .stats-bar {
+      display: flex;
+      gap: 32px;
+      padding-top: 16px;
+      border-top: 1px solid var(--color-border);
+
+      .stat {
+        text-align: center;
+
+        .value {
+          display: block;
+          font-size: 1.8rem;
+          font-weight: 600;
+        }
+
+        .label {
+          font-size: 0.8rem;
+          color: var(--color-text-muted);
+        }
+
+        &.new .value {
+          color: var(--color-success);
+        }
+
+        &.skipped .value {
+          color: var(--color-text-muted);
+        }
+
+        &.failed .value {
+          color: var(--color-error);
+        }
+      }
+    }
+
+    .error-message {
+      margin-top: 16px;
+      padding: 12px;
+      background: var(--color-error-bg);
+      border-radius: 4px;
+      color: var(--color-error);
+    }
+  }
+
+  .messages-section {
+    h2 {
+      margin-bottom: 16px;
+    }
+
+    .empty {
+      color: var(--color-text-muted);
+      text-align: center;
+      padding: 32px;
+    }
+
+    .messages-table {
+      width: 100%;
+      border-collapse: collapse;
+
+      th, td {
+        padding: 10px 12px;
+        text-align: left;
+        border-bottom: 1px solid var(--color-border);
+      }
+
+      th {
+        background: var(--color-surface);
+        font-weight: 600;
+        font-size: 0.85rem;
+        text-transform: uppercase;
+        color: var(--color-text-muted);
+      }
+
+      .uid {
+        font-family: monospace;
+        width: 100px;
+      }
+
+      .status {
+        width: 100px;
+      }
+
+      .time {
+        width: 100px;
+        font-family: monospace;
+        font-size: 0.85rem;
+      }
+
+      .path {
+        a {
+          color: var(--color-primary);
+          text-decoration: none;
+          word-break: break-all;
+
+          &:hover {
+            text-decoration: underline;
+          }
+        }
+
+        .no-path {
+          color: var(--color-text-muted);
+        }
+      }
+
+      .status-pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 10px;
+        font-size: 0.75rem;
+        font-weight: 500;
+
+        &.new {
+          background: var(--color-success-bg);
+          color: var(--color-success);
+        }
+
+        &.skipped {
+          background: var(--color-surface);
+          color: var(--color-text-muted);
+        }
+
+        &.failed {
+          background: var(--color-error-bg);
+          color: var(--color-error);
+        }
+
+        &.unknown {
+          background: var(--color-surface);
+          color: var(--color-text-muted);
+        }
+      }
+    }
+  }
+}

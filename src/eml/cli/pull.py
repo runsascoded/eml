@@ -134,6 +134,7 @@ def pull(
         pulls_db: PullsDB | None = None
         pulled_uids: set[int] = set()
         stored_uidvalidity: int | None = None
+        sync_run_id: int | None = None
 
         if has_cfg and not dry_run:
             pulls_db = get_pulls_db(root)
@@ -194,6 +195,15 @@ def pull(
         aborted = False
         total_for_loop = len(uids)
         console = Console()
+
+        # Start sync run record
+        if pulls_db and not dry_run:
+            sync_run_id = pulls_db.start_sync_run(
+                operation="pull",
+                account=account,
+                folder=src_folder,
+                total=total_for_loop,
+            )
 
         # Write pull status file (for `eml status` to read)
         if has_cfg and not dry_run:
@@ -307,6 +317,7 @@ def pull(
                     # Record successful pull in pulls.db (even for dupes - we pulled it)
                     if pulls_db:
                         msg_date = info.date.isoformat() if info.date else None
+                        msg_status = "skipped" if existing_path else "new"
                         pulls_db.record_pull(
                             account=account,
                             folder=src_folder,
@@ -317,6 +328,8 @@ def pull(
                             local_path=local_path,
                             subject=info.subject,
                             msg_date=msg_date,
+                            status=msg_status,
+                            sync_run_id=sync_run_id,
                         )
 
                     # Clear from failures if previously failed
@@ -354,6 +367,25 @@ def pull(
         # Clear sync status file (we're done)
         if has_cfg and not dry_run:
             clear_sync_status(root)
+
+        # End sync run record
+        if pulls_db and sync_run_id:
+            if aborted:
+                run_status = "aborted"
+                error_msg = f"{consecutive_errors} consecutive errors (rate limited)"
+            elif failed > 0:
+                run_status = "completed"  # Still completed, just with some failures
+                error_msg = None
+            else:
+                run_status = "completed"
+                error_msg = None
+            pulls_db.update_sync_run(
+                sync_run_id,
+                fetched=fetched,
+                skipped=skipped,
+                failed=failed,
+            )
+            pulls_db.end_sync_run(sync_run_id, run_status, error_msg)
 
         # Save failures to disk
         if has_cfg and not dry_run:

@@ -206,6 +206,147 @@ def api_email(path: str):
     }
 
 
+@app.get("/api/sync-runs")
+def api_sync_runs(
+    limit: int = 20,
+    account: str | None = None,
+    folder: str | None = None,
+    operation: str | None = None,
+):
+    """Get recent sync runs (pull/push operations)."""
+    root = get_root()
+    with get_pulls_db(root) as db:
+        runs = db.get_recent_sync_runs(
+            limit=limit,
+            account=account,
+            folder=folder,
+            operation=operation,
+        )
+        return {
+            "runs": [
+                {
+                    "id": r.id,
+                    "operation": r.operation,
+                    "account": r.account,
+                    "folder": r.folder,
+                    "started_at": r.started_at.isoformat(),
+                    "ended_at": r.ended_at.isoformat() if r.ended_at else None,
+                    "status": r.status,
+                    "total": r.total,
+                    "fetched": r.fetched,
+                    "skipped": r.skipped,
+                    "failed": r.failed,
+                    "error_message": r.error_message,
+                }
+                for r in runs
+            ]
+        }
+
+
+@app.get("/api/sync-runs/{run_id}")
+def api_sync_run_detail(run_id: int, message_status: str | None = None, limit: int = 100):
+    """Get details of a specific sync run, including messages processed."""
+    root = get_root()
+    with get_pulls_db(root) as db:
+        run = db.get_sync_run(run_id)
+        if not run:
+            return JSONResponse({"error": f"Sync run {run_id} not found"}, status_code=404)
+
+        messages = db.get_sync_run_messages(run_id, status=message_status, limit=limit)
+
+        return {
+            "run": {
+                "id": run.id,
+                "operation": run.operation,
+                "account": run.account,
+                "folder": run.folder,
+                "started_at": run.started_at.isoformat(),
+                "ended_at": run.ended_at.isoformat() if run.ended_at else None,
+                "status": run.status,
+                "total": run.total,
+                "fetched": run.fetched,
+                "skipped": run.skipped,
+                "failed": run.failed,
+                "error_message": run.error_message,
+            },
+            "messages": [
+                {
+                    "uid": m.uid,
+                    "folder": m.folder,
+                    "message_id": m.message_id,
+                    "local_path": m.local_path,
+                    "pulled_at": m.pulled_at.isoformat(),
+                    "status": m.status,
+                    "content_hash": m.content_hash[:16] + "..." if m.content_hash else None,
+                }
+                for m in messages
+            ],
+        }
+
+
+@app.get("/api/folder/{account}/{folder}")
+def api_folder_detail(account: str, folder: str, recent_limit: int = 50, runs_limit: int = 10):
+    """Get folder detail: recent messages and sync runs for a specific folder."""
+    root = get_root()
+    with get_pulls_db(root) as db:
+        # Get status
+        uidvalidity = db.get_uidvalidity(account, folder)
+        if not uidvalidity:
+            cur = db.conn.execute(
+                "SELECT uidvalidity FROM server_folders WHERE account = ? AND folder = ?",
+                (account, folder)
+            )
+            row = cur.fetchone()
+            uidvalidity = row["uidvalidity"] if row else None
+
+        server_count = db.get_server_uid_count(account, folder) if uidvalidity else 0
+        pulled_count = db.get_pulled_count(account, folder, uidvalidity) if uidvalidity else 0
+
+        # Get recent messages
+        pulls = db.get_recent_pulls(
+            limit=recent_limit, account=account, folder=folder, with_path_only=False
+        )
+
+        # Get sync runs for this folder
+        runs = db.get_recent_sync_runs(
+            limit=runs_limit, account=account, folder=folder
+        )
+
+        return {
+            "account": account,
+            "folder": folder,
+            "uidvalidity": uidvalidity,
+            "server_uids": server_count,
+            "pulled_uids": pulled_count,
+            "messages": [
+                {
+                    "uid": p.uid,
+                    "folder": p.folder,
+                    "path": p.local_path,
+                    "pulled_at": p.pulled_at.isoformat(),
+                    "is_new": p.local_path is not None,
+                    "subject": p.subject,
+                    "msg_date": p.msg_date,
+                }
+                for p in pulls
+            ],
+            "sync_runs": [
+                {
+                    "id": r.id,
+                    "operation": r.operation,
+                    "started_at": r.started_at.isoformat(),
+                    "ended_at": r.ended_at.isoformat() if r.ended_at else None,
+                    "status": r.status,
+                    "total": r.total,
+                    "fetched": r.fetched,
+                    "skipped": r.skipped,
+                    "failed": r.failed,
+                }
+                for r in runs
+            ],
+        }
+
+
 @app.get("/api/sync-status")
 def api_sync_status():
     """Get current sync operation status from SQLite."""
