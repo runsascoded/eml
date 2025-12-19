@@ -50,6 +50,8 @@ class PulledMessage:
     pulled_at: datetime
     status: str | None = None  # 'new', 'skipped', 'failed'
     sync_run_id: int | None = None  # FK to sync_runs
+    subject: str | None = None  # Email subject
+    msg_date: str | None = None  # Original message date
     error_message: str | None = None  # error message for failed pulls
     # Threading fields
     in_reply_to: str | None = None  # In-Reply-To header
@@ -57,7 +59,6 @@ class PulledMessage:
     # Search fields
     from_addr: str | None = None  # From header
     to_addr: str | None = None  # To header
-    body_text: str | None = None  # Plain text body (for FTS)
 
 
 @dataclass
@@ -167,7 +168,6 @@ class PullsDB:
                 -- Search fields
                 from_addr TEXT,  -- From header
                 to_addr TEXT,  -- To header
-                body_text TEXT,  -- Plain text body (for FTS)
                 PRIMARY KEY (account, folder, uidvalidity, uid)
             );
 
@@ -220,18 +220,10 @@ class PullsDB:
             );
         """)
 
-        # Create FTS5 virtual table for full-text search (separate from executescript)
-        # Using external content table to avoid storing content twice
-        self.conn.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-                subject,
-                body_text,
-                from_addr,
-                to_addr,
-                content='pulled_messages',
-                content_rowid='rowid'
-            )
-        """)
+        # Create FTS5 virtual table for full-text search
+        # Using regular FTS5 (not external content) for simplicity and reliability.
+        # This duplicates searchable text but avoids sync complexity and corruption issues.
+        self._ensure_fts_table()
 
         # Migrations: add columns to existing tables (for databases created before these columns existed)
         # These run AFTER CREATE TABLE to avoid errors on fresh databases
@@ -253,7 +245,67 @@ class PullsDB:
         # Search columns
         _add_column_if_missing("pulled_messages", "from_addr")
         _add_column_if_missing("pulled_messages", "to_addr")
-        _add_column_if_missing("pulled_messages", "body_text")
+
+    def _ensure_fts_table(self) -> None:
+        """Ensure FTS5 table exists and is the correct type (regular, not external content).
+
+        Migrates from external content FTS to regular FTS if needed.
+        """
+        # Check if messages_fts exists and what type it is
+        cur = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='messages_fts'"
+        )
+        row = cur.fetchone()
+
+        needs_recreate = False
+        if row:
+            sql = row[0] or ""
+            # Need to recreate if: external content table OR missing message_id column
+            if "content=" in sql or "content_rowid=" in sql:
+                needs_recreate = True
+            elif "message_id" not in sql:
+                needs_recreate = True
+
+        if needs_recreate:
+            self.conn.execute("DROP TABLE IF EXISTS messages_fts")
+            row = None
+
+        if not row or needs_recreate:
+            # Create regular FTS5 table with message_id for joining back to pulled_messages
+            self.conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                    message_id,
+                    subject,
+                    body_text,
+                    from_addr,
+                    to_addr
+                )
+            """)
+            self.conn.commit()
+
+    def insert_fts(
+        self,
+        message_id: str | None,
+        subject: str | None,
+        body_text: str | None,
+        from_addr: str | None,
+        to_addr: str | None,
+    ) -> None:
+        """Insert a message into the FTS index.
+
+        Args:
+            message_id: Message-ID header (for joining back to pulled_messages)
+            subject: Email subject
+            body_text: Plain text body
+            from_addr: From header
+            to_addr: To header
+        """
+        if not message_id:
+            return  # Can't index without message_id for join
+        self.conn.execute("""
+            INSERT INTO messages_fts(message_id, subject, body_text, from_addr, to_addr)
+            VALUES (?, ?, ?, ?, ?)
+        """, (message_id, subject, body_text, from_addr, to_addr))
 
     def record_pull(
         self,
@@ -276,7 +328,7 @@ class PullsDB:
         # Search fields
         from_addr: str | None = None,
         to_addr: str | None = None,
-        body_text: str | None = None,
+        body_text: str | None = None,  # For FTS only (not stored in pulled_messages)
     ) -> None:
         """Record a pulled message (success or failure).
 
@@ -298,29 +350,24 @@ class PullsDB:
             references: References header (space-separated message-ids, for threading)
             from_addr: From header (for search)
             to_addr: To header (for search)
-            body_text: Plain text body (for FTS)
+            body_text: Plain text body (for FTS only, not stored in pulled_messages)
         """
         ts = (pulled_at or datetime.now()).isoformat()
-        cur = self.conn.execute("""
+        self.conn.execute("""
             INSERT OR REPLACE INTO pulled_messages
                 (account, folder, uidvalidity, uid, content_hash, message_id, local_path, pulled_at,
                  subject, msg_date, status, sync_run_id, error_message,
-                 in_reply_to, references_, from_addr, to_addr, body_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 in_reply_to, references_, from_addr, to_addr)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             account, folder, uidvalidity, uid, content_hash,
             message_id, local_path, ts, subject, msg_date, status, sync_run_id, error_message,
-            in_reply_to, references, from_addr, to_addr, body_text
+            in_reply_to, references, from_addr, to_addr
         ))
-        rowid = cur.lastrowid
 
-        # Update FTS index if we have searchable content
-        if subject or body_text or from_addr or to_addr:
-            self.conn.execute("DELETE FROM messages_fts WHERE rowid = ?", (rowid,))
-            self.conn.execute("""
-                INSERT INTO messages_fts(rowid, subject, body_text, from_addr, to_addr)
-                VALUES (?, ?, ?, ?, ?)
-            """, (rowid, subject, body_text, from_addr, to_addr))
+        # Incremental FTS indexing - add to search index immediately
+        if status != "failed":
+            self.insert_fts(message_id, subject, body_text, from_addr, to_addr)
 
         self.conn.commit()
 
@@ -963,6 +1010,25 @@ class PullsDB:
             for row in cur
         ]
 
+    def cleanup_stale_runs(self, max_age_minutes: int = 60) -> int:
+        """Mark stale running sync runs as aborted.
+
+        Args:
+            max_age_minutes: Consider runs stale if started more than this many minutes ago
+
+        Returns:
+            Number of runs marked as aborted
+        """
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(minutes=max_age_minutes)).isoformat()
+        cur = self.conn.execute("""
+            UPDATE sync_runs
+            SET status = 'aborted', ended_at = datetime('now'), error_message = 'Marked as stale (no completion)'
+            WHERE status = 'running' AND started_at < ?
+        """, (cutoff,))
+        self.conn.commit()
+        return cur.rowcount
+
     def get_sync_run_messages(
         self,
         sync_run_id: int,
@@ -1072,6 +1138,7 @@ class PullsDB:
 
     def _row_to_pulled_message(self, row: sqlite3.Row) -> PulledMessage:
         """Convert a database row to a PulledMessage object."""
+        keys = row.keys()
         return PulledMessage(
             account=row["account"],
             folder=row["folder"],
@@ -1083,11 +1150,13 @@ class PullsDB:
             pulled_at=datetime.fromisoformat(row["pulled_at"]),
             status=row["status"],
             sync_run_id=row["sync_run_id"],
-            error_message=row.get("error_message"),
-            in_reply_to=row.get("in_reply_to"),
-            references=row.get("references_"),
-            from_addr=row.get("from_addr"),
-            to_addr=row.get("to_addr"),
+            subject=row["subject"] if "subject" in keys else None,
+            msg_date=row["msg_date"] if "msg_date" in keys else None,
+            error_message=row["error_message"] if "error_message" in keys else None,
+            in_reply_to=row["in_reply_to"] if "in_reply_to" in keys else None,
+            references=row["references_"] if "references_" in keys else None,
+            from_addr=row["from_addr"] if "from_addr" in keys else None,
+            to_addr=row["to_addr"] if "to_addr" in keys else None,
         )
 
     # -------------------------------------------------------------------------
@@ -1098,6 +1167,7 @@ class PullsDB:
         self,
         query: str,
         limit: int = 50,
+        offset: int = 0,
         account: str | None = None,
         folder: str | None = None,
     ) -> list[PulledMessage]:
@@ -1112,7 +1182,7 @@ class PullsDB:
         Returns:
             List of PulledMessage objects matching the query
         """
-        # Build the query - join FTS results with pulled_messages
+        # Build the query - join FTS results with pulled_messages via message_id
         conditions = ["messages_fts MATCH ?"]
         params: list = [query]
 
@@ -1124,70 +1194,80 @@ class PullsDB:
             params.append(folder)
 
         where = " AND ".join(conditions)
-        params.append(limit)
+        params.extend([limit, offset])
 
         cur = self.conn.execute(f"""
             SELECT p.account, p.folder, p.uidvalidity, p.uid, p.content_hash, p.message_id,
-                   p.local_path, p.pulled_at, p.status, p.sync_run_id, p.subject, p.msg_date,
-                   p.error_message, p.in_reply_to, p.references_, p.from_addr, p.to_addr,
+                   p.local_path, p.pulled_at, p.status, p.sync_run_id,
+                   COALESCE(messages_fts.subject, p.subject) as subject,
+                   p.msg_date,
+                   p.error_message, p.in_reply_to, p.references_,
+                   COALESCE(messages_fts.from_addr, p.from_addr) as from_addr,
+                   COALESCE(messages_fts.to_addr, p.to_addr) as to_addr,
                    bm25(messages_fts) as rank
             FROM messages_fts
-            JOIN pulled_messages p ON messages_fts.rowid = p.rowid
+            JOIN pulled_messages p ON messages_fts.message_id = p.message_id
             WHERE {where}
-            ORDER BY rank
-            LIMIT ?
+            ORDER BY p.msg_date DESC NULLS LAST
+            LIMIT ? OFFSET ?
         """, params)
 
         return [self._row_to_pulled_message(row) for row in cur]
 
+    def search_count(
+        self,
+        query: str,
+        account: str | None = None,
+        folder: str | None = None,
+    ) -> int:
+        """Get total count of search results (for pagination)."""
+        conditions = ["messages_fts MATCH ?"]
+        params: list = [query]
+
+        if account:
+            conditions.append("p.account = ?")
+            params.append(account)
+        if folder:
+            conditions.append("p.folder = ?")
+            params.append(folder)
+
+        where = " AND ".join(conditions)
+
+        cur = self.conn.execute(f"""
+            SELECT COUNT(*) as cnt
+            FROM messages_fts
+            JOIN pulled_messages p ON messages_fts.message_id = p.message_id
+            WHERE {where}
+        """, params)
+        row = cur.fetchone()
+        return row["cnt"] if row else 0
+
     def rebuild_fts_index(self) -> int:
-        """Rebuild the FTS5 index from pulled_messages.
+        """Rebuild the FTS5 index from pulled_messages (subject/from/to only).
+
+        Note: body_text is not stored in pulled_messages, so this only rebuilds
+        from subject/from_addr/to_addr. Use `eml index-fts` to rebuild with
+        full body text by re-reading .eml files.
 
         Returns:
             Number of messages indexed
         """
-        # Delete all FTS content
+        # Clear existing FTS data
         self.conn.execute("DELETE FROM messages_fts")
 
-        # Repopulate from pulled_messages
+        # Re-insert all messages that have a message_id (required for join)
+        # body_text will be NULL since we don't store it in pulled_messages
         cur = self.conn.execute("""
-            INSERT INTO messages_fts(rowid, subject, body_text, from_addr, to_addr)
-            SELECT rowid, subject, body_text, from_addr, to_addr
+            INSERT INTO messages_fts(message_id, subject, body_text, from_addr, to_addr)
+            SELECT message_id, subject, NULL, from_addr, to_addr
             FROM pulled_messages
-            WHERE subject IS NOT NULL OR body_text IS NOT NULL
+            WHERE message_id IS NOT NULL
+              AND subject IS NOT NULL
         """)
-        self.conn.commit()
-        return cur.rowcount
-
-    def update_fts_for_message(
-        self,
-        rowid: int,
-        subject: str | None,
-        body_text: str | None,
-        from_addr: str | None,
-        to_addr: str | None,
-    ) -> None:
-        """Update FTS index for a single message.
-
-        Args:
-            rowid: The rowid in pulled_messages table
-            subject: Email subject
-            body_text: Plain text body
-            from_addr: From header
-            to_addr: To header
-        """
-        # Delete existing FTS entry if any
-        self.conn.execute(
-            "DELETE FROM messages_fts WHERE rowid = ?",
-            (rowid,)
-        )
-        # Insert new entry
-        self.conn.execute("""
-            INSERT INTO messages_fts(rowid, subject, body_text, from_addr, to_addr)
-            VALUES (?, ?, ?, ?, ?)
-        """, (rowid, subject, body_text, from_addr, to_addr))
+        count = cur.rowcount
         self.conn.commit()
 
+        return count
 
 def get_pulls_db(root: Path | None = None) -> PullsDB:
     """Get PullsDB instance for the current project.

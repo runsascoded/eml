@@ -1,44 +1,100 @@
-import { useState, useCallback, type FormEvent } from 'react'
+import { useState, useCallback, useEffect, useRef, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import type { SearchResult, SearchResponse } from '../types'
 import './Search.scss'
 
+const PAGE_SIZE = 50
+const DEBOUNCE_MS = 300
+
 export function Search() {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<SearchResult[]>([])
-  const [count, setCount] = useState<number | null>(null)
+  const [total, setTotal] = useState<number | null>(null)
+  const [offset, setOffset] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const debounceRef = useRef<NodeJS.Timeout | null>(null)
 
-  const handleSearch = useCallback(async (e?: FormEvent) => {
-    e?.preventDefault()
-    if (!query.trim()) return
+  const doSearch = useCallback(async (searchQuery: string, searchOffset: number) => {
+    if (!searchQuery.trim()) {
+      setResults([])
+      setTotal(null)
+      setOffset(0)
+      return
+    }
 
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&limit=50`)
+      const res = await fetch(
+        `/api/search?q=${encodeURIComponent(searchQuery)}&limit=${PAGE_SIZE}&offset=${searchOffset}`
+      )
       const data: SearchResponse = await res.json()
       if (data.error) {
         setError(data.error)
         setResults([])
-        setCount(null)
+        setTotal(null)
       } else {
         setResults(data.results)
-        setCount(data.count)
+        setTotal(data.total)
+        setOffset(searchOffset)
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Search failed')
       setResults([])
-      setCount(null)
+      setTotal(null)
     } finally {
       setLoading(false)
     }
-  }, [query])
+  }, [])
+
+  // Debounced search-as-you-type
+  useEffect(() => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current)
+    }
+    debounceRef.current = setTimeout(() => {
+      doSearch(query, 0)
+    }, DEBOUNCE_MS)
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current)
+    }
+  }, [query, doSearch])
+
+  const handleSubmit = (e: FormEvent) => {
+    e.preventDefault()
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    doSearch(query, 0)
+  }
+
+  const handleClear = () => {
+    setQuery('')
+    setResults([])
+    setTotal(null)
+    setOffset(0)
+    setError(null)
+  }
+
+  const handlePrev = () => {
+    if (offset > 0) {
+      doSearch(query, Math.max(0, offset - PAGE_SIZE))
+    }
+  }
+
+  const handleNext = () => {
+    if (total !== null && offset + PAGE_SIZE < total) {
+      doSearch(query, offset + PAGE_SIZE)
+    }
+  }
+
+  const startIdx = offset + 1
+  const endIdx = Math.min(offset + results.length, total ?? 0)
+  const hasPrev = offset > 0
+  const hasNext = total !== null && offset + PAGE_SIZE < total
 
   return (
     <div className="search-container">
-      <form className="search-form" onSubmit={handleSearch}>
+      <form className="search-form" onSubmit={handleSubmit}>
         <input
           type="text"
           className="search-input"
@@ -46,6 +102,11 @@ export function Search() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
+        {query && (
+          <button type="button" className="clear-button" onClick={handleClear} title="Clear search">
+            &times;
+          </button>
+        )}
         <button type="submit" className="search-button" disabled={loading || !query.trim()}>
           {loading ? 'Searching...' : 'Search'}
         </button>
@@ -53,9 +114,21 @@ export function Search() {
 
       {error && <div className="search-error">{error}</div>}
 
-      {count !== null && (
-        <div className="search-count">
-          {count} result{count !== 1 ? 's' : ''}
+      {total !== null && (
+        <div className="search-header">
+          <div className="search-count">
+            {total === 0 ? 'No results' : `Showing ${startIdx}-${endIdx} of ${total.toLocaleString()}`}
+          </div>
+          {total > PAGE_SIZE && (
+            <div className="pagination">
+              <button onClick={handlePrev} disabled={!hasPrev || loading} className="page-button">
+                Prev
+              </button>
+              <button onClick={handleNext} disabled={!hasNext || loading} className="page-button">
+                Next
+              </button>
+            </div>
+          )}
         </div>
       )}
 

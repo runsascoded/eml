@@ -28,6 +28,31 @@ h1 {
   margin-top: 0;
 }
 
+.header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: $spacing-md;
+
+  h1 {
+    margin-bottom: 0;
+  }
+
+  .browse-link {
+    padding: $spacing-xs $spacing-md;
+    background: var(--accent);
+    color: white;
+    text-decoration: none;
+    border-radius: $radius-sm;
+    font-size: 0.9rem;
+    transition: opacity 0.2s;
+
+    &:hover {
+      opacity: 0.9;
+    }
+  }
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));

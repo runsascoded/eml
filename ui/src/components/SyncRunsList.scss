@@ -121,4 +121,9 @@
     background: var(--color-error-bg);
     color: var(--color-error);
   }
+
+  &.status-stale {
+    background: var(--color-error-bg);
+    color: var(--color-error);
+  }
 }

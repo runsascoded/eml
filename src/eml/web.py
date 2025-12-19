@@ -352,6 +352,7 @@ def api_folder_detail(account: str, folder: str, recent_limit: int = 50, runs_li
 def api_search(
     q: str,
     limit: int = 50,
+    offset: int = 0,
     account: str | None = None,
     folder: str | None = None,
 ):
@@ -363,17 +364,25 @@ def api_search(
     - AND/OR: `budget OR finance`
     - NOT: `report NOT draft`
     - Column-specific: `from_addr:john subject:budget`
+
+    Returns paginated results with total count for pagination UI.
     """
     root = get_root()
     with get_pulls_db(root) as db:
         try:
-            results = db.search(query=q, limit=limit, account=account, folder=folder)
+            total = db.search_count(query=q, account=account, folder=folder)
+            results = db.search(
+                query=q, limit=limit, offset=offset, account=account, folder=folder
+            )
         except Exception as e:
             return JSONResponse({"error": f"Search error: {e}"}, status_code=400)
 
         return {
             "query": q,
+            "total": total,
             "count": len(results),
+            "offset": offset,
+            "limit": limit,
             "results": [
                 {
                     "account": m.account,
@@ -459,6 +468,19 @@ def api_rebuild_fts():
         return {"status": "ok", "indexed": count}
 
 
+@app.post("/api/sync-runs/cleanup-stale")
+def api_cleanup_stale_runs(max_age_minutes: int = 60):
+    """Mark stale running sync runs as aborted.
+
+    Args:
+        max_age_minutes: Consider runs stale if started more than this many minutes ago (default: 60)
+    """
+    root = get_root()
+    with get_pulls_db(root) as db:
+        count = db.cleanup_stale_runs(max_age_minutes)
+        return {"status": "ok", "cleaned": count}
+
+
 @app.get("/api/fs-folders")
 def api_fs_folders(account: str | None = None):
     """Get folders from filesystem layout (not pulls.db).
@@ -496,6 +518,90 @@ def api_fs_folders(account: str | None = None):
     folders.sort(key=lambda x: (x["account"], x["folder"]))
 
     return {"folders": folders}
+
+
+@app.get("/api/fs-emails/{account}/{folder}")
+def api_fs_emails(
+    account: str,
+    folder: str,
+    limit: int = 100,
+    offset: int = 0,
+    sort: str = "date_desc",
+):
+    """List emails in a folder from filesystem.
+
+    Args:
+        account: Account/folder name (e.g., "Inbox")
+        folder: Subfolder name (e.g., "2025")
+        limit: Max emails to return
+        offset: Offset for pagination
+        sort: Sort order ("date_desc", "date_asc", "name")
+    """
+    from email import policy
+
+    root = get_root()
+    folder_path = root / account / folder
+
+    # Security check
+    try:
+        folder_path = folder_path.resolve()
+        if not str(folder_path).startswith(str(root.resolve())):
+            return JSONResponse({"error": "Access denied"}, status_code=403)
+    except Exception:
+        return JSONResponse({"error": "Invalid path"}, status_code=400)
+
+    if not folder_path.exists() or not folder_path.is_dir():
+        return JSONResponse({"error": "Folder not found"}, status_code=404)
+
+    # Find all .eml files recursively
+    eml_files = list(folder_path.rglob("*.eml"))
+
+    # Sort files
+    if sort == "date_desc":
+        eml_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    elif sort == "date_asc":
+        eml_files.sort(key=lambda p: p.stat().st_mtime)
+    else:  # name
+        eml_files.sort(key=lambda p: p.name)
+
+    total = len(eml_files)
+    eml_files = eml_files[offset : offset + limit]
+
+    # Parse headers from each email
+    emails = []
+    for path in eml_files:
+        rel_path = str(path.relative_to(root))
+        try:
+            with open(path, "rb") as f:
+                # Only parse headers for speed
+                msg = email.message_from_binary_file(f, policy=policy.default)
+
+            emails.append({
+                "path": rel_path,
+                "subject": msg.get("Subject", "(no subject)"),
+                "from": msg.get("From", ""),
+                "to": msg.get("To", ""),
+                "date": msg.get("Date", ""),
+                "size": path.stat().st_size,
+            })
+        except Exception as e:
+            emails.append({
+                "path": rel_path,
+                "subject": f"(error: {e})",
+                "from": "",
+                "to": "",
+                "date": "",
+                "size": path.stat().st_size,
+            })
+
+    return {
+        "account": account,
+        "folder": folder,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "emails": emails,
+    }
 
 
 @app.get("/api/sync-status")

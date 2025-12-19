@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react'
+import { Link } from 'react-router-dom'
 import { FolderNav } from './FolderNav'
 import { SyncStatusBar } from './SyncStatusBar'
 import { UIDSummary } from './UIDSummary'
@@ -45,10 +46,13 @@ export function Dashboard() {
 
   return (
     <>
-      <h1>
-        <span className="live-indicator" />
-        EML Status
-      </h1>
+      <div className="header-row">
+        <h1>
+          <span className="live-indicator" />
+          EML Status
+        </h1>
+        <Link to="/browse" className="browse-link">Browse Emails</Link>
+      </div>
       <FolderNav
         folders={folders}
         currentAccount={account}

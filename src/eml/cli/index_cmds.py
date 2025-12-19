@@ -685,10 +685,11 @@ def fsck(folder: str, output_json: bool, show_missing: bool, verbose: bool, acco
 
 @click.command(name="index-fts")
 @require_init
-@option('-R', '--rebuild', is_flag=True, help="Rebuild entire FTS index from scratch")
+@option('-j', '--jobs', type=int, default=8, help="Number of parallel workers (default: 8)")
 @option('-l', '--limit', type=int, help="Limit number of messages to process")
+@option('-R', '--rebuild', is_flag=True, help="Rebuild entire FTS index from scratch")
 @option('-v', '--verbose', is_flag=True, help="Show progress for each message")
-def index_fts(rebuild: bool, limit: int | None, verbose: bool):
+def index_fts(jobs: int, limit: int | None, rebuild: bool, verbose: bool):
     """Build or update FTS (full-text search) index.
 
     \b
@@ -719,9 +720,10 @@ def index_fts(rebuild: bool, limit: int | None, verbose: bool):
 
         # Find messages with local_path but missing FTS fields
         cur = pulls_db.conn.execute("""
-            SELECT rowid, local_path, subject, from_addr, to_addr, body_text
+            SELECT rowid, message_id, local_path, subject, from_addr, to_addr, body_text
             FROM pulled_messages
             WHERE local_path IS NOT NULL
+              AND message_id IS NOT NULL
               AND (body_text IS NULL OR body_text = '')
             ORDER BY rowid DESC
         """ + (f" LIMIT {limit}" if limit else ""))
@@ -731,12 +733,53 @@ def index_fts(rebuild: bool, limit: int | None, verbose: bool):
             echo("No messages need FTS indexing")
             return
 
-        echo(f"Processing {len(rows):,} messages...")
+        echo(f"Processing {len(rows):,} messages with {jobs} workers...")
 
         console = Console()
         indexed = 0
         skipped = 0
         errors = 0
+
+        # Helper function for parallel file reading/parsing (I/O-bound)
+        def process_file(row):
+            """Read and parse a single .eml file. Returns extracted data or error."""
+            rowid = row["rowid"]
+            message_id = row["message_id"]
+            local_path = row["local_path"]
+            subject = row["subject"]
+            from_addr = row["from_addr"]
+            to_addr = row["to_addr"]
+
+            eml_path = root / local_path
+            if not eml_path.exists():
+                return {"status": "skipped", "local_path": local_path}
+
+            try:
+                raw = eml_path.read_bytes()
+                body_text = extract_body_text(raw)
+
+                # Also extract from/to if missing
+                if not from_addr or not to_addr:
+                    msg = BytesParser(policy=policy.default).parsebytes(raw)
+                    if not from_addr:
+                        from_addr = msg.get("From", "")
+                    if not to_addr:
+                        to_addr = msg.get("To", "")
+
+                return {
+                    "status": "ok",
+                    "rowid": rowid,
+                    "message_id": message_id,
+                    "subject": subject,
+                    "from_addr": from_addr,
+                    "to_addr": to_addr,
+                    "body_text": body_text,
+                    "local_path": local_path,
+                }
+            except Exception as e:
+                return {"status": "error", "local_path": local_path, "error": str(e)}
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         with Progress(
             SpinnerColumn(),
@@ -748,63 +791,60 @@ def index_fts(rebuild: bool, limit: int | None, verbose: bool):
         ) as progress:
             task = progress.add_task("Indexing FTS...", total=len(rows))
 
-            for row in rows:
-                rowid = row["rowid"]
-                local_path = row["local_path"]
-                subject = row["subject"]
-                from_addr = row["from_addr"]
-                to_addr = row["to_addr"]
+            # Process files in parallel, write to DB sequentially
+            with ThreadPoolExecutor(max_workers=jobs) as executor:
+                futures = {executor.submit(process_file, row): row for row in rows}
 
-                progress.advance(task)
+                batch = []
+                for future in as_completed(futures):
+                    result = future.result()
+                    progress.advance(task)
 
-                # Read .eml file and extract body
-                eml_path = root / local_path
-                if not eml_path.exists():
-                    if verbose:
-                        console.print(f"[yellow]Skip[/] {local_path} (file not found)")
-                    skipped += 1
-                    continue
+                    if result["status"] == "skipped":
+                        skipped += 1
+                        if verbose:
+                            console.print(f"[yellow]Skip[/] {result['local_path']} (file not found)")
+                    elif result["status"] == "error":
+                        errors += 1
+                        if verbose:
+                            console.print(f"[red]Error[/] {result['local_path']}: {result['error']}")
+                    else:
+                        batch.append(result)
+                        indexed += 1
+                        if verbose:
+                            console.print(f"[green]OK[/] {result['local_path'][:60]}")
 
-                try:
-                    raw = eml_path.read_bytes()
-                    body_text = extract_body_text(raw)
+                    # Batch write every 100 results
+                    if len(batch) >= 100:
+                        for r in batch:
+                            # Update from/to in pulled_messages (body_text only stored in FTS)
+                            pulls_db.conn.execute("""
+                                UPDATE pulled_messages
+                                SET from_addr = ?, to_addr = ?
+                                WHERE rowid = ?
+                            """, (r["from_addr"], r["to_addr"], r["rowid"]))
+                            pulls_db.conn.execute("DELETE FROM messages_fts WHERE message_id = ?", (r["message_id"],))
+                            pulls_db.conn.execute("""
+                                INSERT INTO messages_fts(message_id, subject, body_text, from_addr, to_addr)
+                                VALUES (?, ?, ?, ?, ?)
+                            """, (r["message_id"], r["subject"], r["body_text"], r["from_addr"], r["to_addr"]))
+                        pulls_db.conn.commit()
+                        batch = []
 
-                    # Also extract from/to if missing
-                    if not from_addr or not to_addr:
-                        msg = BytesParser(policy=policy.default).parsebytes(raw)
-                        if not from_addr:
-                            from_addr = msg.get("From", "")
-                        if not to_addr:
-                            to_addr = msg.get("To", "")
-
-                    # Update the main table
+                # Write remaining batch
+                for r in batch:
+                    # Update from/to in pulled_messages (body_text only stored in FTS)
                     pulls_db.conn.execute("""
                         UPDATE pulled_messages
-                        SET from_addr = ?, to_addr = ?, body_text = ?
+                        SET from_addr = ?, to_addr = ?
                         WHERE rowid = ?
-                    """, (from_addr, to_addr, body_text, rowid))
-
-                    # Update FTS index
-                    pulls_db.conn.execute("DELETE FROM messages_fts WHERE rowid = ?", (rowid,))
+                    """, (r["from_addr"], r["to_addr"], r["rowid"]))
+                    pulls_db.conn.execute("DELETE FROM messages_fts WHERE message_id = ?", (r["message_id"],))
                     pulls_db.conn.execute("""
-                        INSERT INTO messages_fts(rowid, subject, body_text, from_addr, to_addr)
+                        INSERT INTO messages_fts(message_id, subject, body_text, from_addr, to_addr)
                         VALUES (?, ?, ?, ?, ?)
-                    """, (rowid, subject, body_text, from_addr, to_addr))
-
-                    indexed += 1
-                    if verbose:
-                        console.print(f"[green]OK[/] {local_path[:60]}")
-
-                except Exception as e:
-                    errors += 1
-                    if verbose:
-                        console.print(f"[red]Error[/] {local_path}: {e}")
-
-                # Commit every 100 messages
-                if indexed % 100 == 0:
-                    pulls_db.conn.commit()
-
-            pulls_db.conn.commit()
+                    """, (r["message_id"], r["subject"], r["body_text"], r["from_addr"], r["to_addr"]))
+                pulls_db.conn.commit()
 
         echo()
         echo(f"Indexed: {indexed:,}")

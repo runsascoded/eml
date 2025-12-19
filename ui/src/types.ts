@@ -102,9 +102,37 @@ export interface SearchResult {
 
 export interface SearchResponse {
   query: string
+  total: number
   count: number
+  offset: number
+  limit: number
   results: SearchResult[]
   error?: string
+}
+
+export interface FSFolder {
+  account: string
+  folder: string
+  path: string
+  eml_count: number
+}
+
+export interface FSEmail {
+  path: string
+  subject: string
+  from: string
+  to: string
+  date: string
+  size: number
+}
+
+export interface FSEmailsResponse {
+  account: string
+  folder: string
+  total: number
+  offset: number
+  limit: number
+  emails: FSEmail[]
 }
 
 export interface EmailAttachment {
