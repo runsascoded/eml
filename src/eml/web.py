@@ -348,6 +348,156 @@ def api_folder_detail(account: str, folder: str, recent_limit: int = 50, runs_li
         }
 
 
+@app.get("/api/search")
+def api_search(
+    q: str,
+    limit: int = 50,
+    account: str | None = None,
+    folder: str | None = None,
+):
+    """Full-text search over emails.
+
+    The query supports FTS5 syntax:
+    - Simple terms: `meeting report`
+    - Phrases: `"board meeting"`
+    - AND/OR: `budget OR finance`
+    - NOT: `report NOT draft`
+    - Column-specific: `from_addr:john subject:budget`
+    """
+    root = get_root()
+    with get_pulls_db(root) as db:
+        try:
+            results = db.search(query=q, limit=limit, account=account, folder=folder)
+        except Exception as e:
+            return JSONResponse({"error": f"Search error: {e}"}, status_code=400)
+
+        return {
+            "query": q,
+            "count": len(results),
+            "results": [
+                {
+                    "account": m.account,
+                    "folder": m.folder,
+                    "uid": m.uid,
+                    "message_id": m.message_id,
+                    "subject": m.subject,
+                    "local_path": m.local_path,
+                    "msg_date": m.msg_date,
+                    "from_addr": m.from_addr,
+                    "to_addr": m.to_addr,
+                }
+                for m in results
+            ],
+        }
+
+
+@app.get("/api/thread/{message_id:path}")
+def api_thread(message_id: str, limit: int = 100):
+    """Get all messages in a thread by Message-ID.
+
+    Returns messages that:
+    - Have this message_id
+    - Reply to this message_id (via In-Reply-To)
+    - Reference this message_id (via References)
+    """
+    root = get_root()
+    with get_pulls_db(root) as db:
+        messages = db.get_thread(message_id=message_id, limit=limit)
+        return {
+            "message_id": message_id,
+            "count": len(messages),
+            "messages": [
+                {
+                    "account": m.account,
+                    "folder": m.folder,
+                    "uid": m.uid,
+                    "message_id": m.message_id,
+                    "local_path": m.local_path,
+                    "msg_date": m.msg_date,
+                    "in_reply_to": m.in_reply_to,
+                    "references": m.references,
+                    "from_addr": m.from_addr,
+                    "to_addr": m.to_addr,
+                }
+                for m in messages
+            ],
+        }
+
+
+@app.get("/api/replies/{message_id:path}")
+def api_replies(message_id: str, limit: int = 100):
+    """Get direct replies to a message."""
+    root = get_root()
+    with get_pulls_db(root) as db:
+        messages = db.get_replies(message_id=message_id, limit=limit)
+        return {
+            "message_id": message_id,
+            "count": len(messages),
+            "replies": [
+                {
+                    "account": m.account,
+                    "folder": m.folder,
+                    "uid": m.uid,
+                    "message_id": m.message_id,
+                    "local_path": m.local_path,
+                    "msg_date": m.msg_date,
+                    "in_reply_to": m.in_reply_to,
+                    "from_addr": m.from_addr,
+                    "to_addr": m.to_addr,
+                }
+                for m in messages
+            ],
+        }
+
+
+@app.post("/api/fts/rebuild")
+def api_rebuild_fts():
+    """Rebuild the full-text search index from pulled_messages."""
+    root = get_root()
+    with get_pulls_db(root) as db:
+        count = db.rebuild_fts_index()
+        return {"status": "ok", "indexed": count}
+
+
+@app.get("/api/fs-folders")
+def api_fs_folders(account: str | None = None):
+    """Get folders from filesystem layout (not pulls.db).
+
+    This lists folders that exist on disk, which may differ from
+    what's tracked in pulls.db (e.g., v1 pulls without db tracking).
+    """
+    root = get_root()
+
+    folders = []
+    # List top-level directories (accounts)
+    for path in root.iterdir():
+        if not path.is_dir() or path.name.startswith("."):
+            continue
+        acct = path.name
+        if account and acct != account:
+            continue
+
+        # List subfolders (IMAP folders)
+        for folder_path in path.iterdir():
+            if not folder_path.is_dir() or folder_path.name.startswith("."):
+                continue
+
+            # Count .eml files (recursively for date-organized layouts)
+            eml_count = len(list(folder_path.rglob("*.eml")))
+            if eml_count > 0:
+                folders.append({
+                    "account": acct,
+                    "folder": folder_path.name,
+                    "path": str(folder_path.relative_to(root)),
+                    "eml_count": eml_count,
+                })
+
+    # Sort by account, then folder name
+    folders.sort(key=lambda x: (x["account"], x["folder"]))
+
+    return {"folders": folders}
+
+
 @app.get("/api/sync-status")
 def api_sync_status():
     """Get current sync operation status from SQLite."""

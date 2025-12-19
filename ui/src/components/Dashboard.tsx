@@ -5,6 +5,7 @@ import { UIDSummary } from './UIDSummary'
 import { Histogram } from './Histogram'
 import { RecentActivity } from './RecentActivity'
 import { SyncRunsList } from './SyncRunsList'
+import { Search } from './Search'
 import { useFolders, useStatus, useRecent, useHistogram, useSyncStatus, useSyncRuns, useSSE } from '../hooks/useApi'
 import type { UIDStatus, PullActivity, SyncStatus } from '../types'
 
@@ -56,6 +57,10 @@ export function Dashboard() {
         linkMode
       />
       <SyncStatusBar sync={sync} />
+      <div className="card">
+        <h2>Search</h2>
+        <Search />
+      </div>
       <div className="grid">
         <div className="card">
           <h2>Recent Sync Runs</h2>

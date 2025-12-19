@@ -19,6 +19,7 @@ from rich.progress import (
 from ..config import AccountConfig, PullFailure, find_eml_root, load_config, load_failures, save_failures, get_failures_path
 from ..imap import IMAPClient
 from ..layouts.path_template import content_hash
+from ..parsing import extract_body_text
 from ..pulls import PullsDB, get_pulls_db
 from ..storage import MessageStorage, get_msgs_db_path
 
@@ -342,6 +343,7 @@ def pull(
                     if pulls_db:
                         msg_date = info.date.isoformat() if info.date else None
                         msg_status = "skipped" if existing_path else "new"
+                        body_text = extract_body_text(raw) if raw else None
                         pulls_db.record_pull(
                             account=account,
                             folder=src_folder,
@@ -354,6 +356,9 @@ def pull(
                             msg_date=msg_date,
                             status=msg_status,
                             sync_run_id=sync_run_id,
+                            from_addr=info.from_addr or None,
+                            to_addr=info.to_addr or None,
+                            body_text=body_text,
                         )
 
                     # Clear from failures if previously failed

@@ -19,7 +19,7 @@ from .utils import AliasGroup
 # Import command groups and commands
 from .account import account
 from .attachments import attachments
-from .index_cmds import backfill, fsck, index, uids
+from .index_cmds import backfill, fsck, index, index_fts, uids
 from .misc import convert, folders, init, ingest, ls, migrate, tags
 from .pull import pull
 from .push import push
@@ -54,6 +54,7 @@ main.add_command(convert)
 main.add_command(folders)
 main.add_command(fsck)
 main.add_command(index)
+main.add_command(index_fts)
 main.add_command(ingest)
 main.add_command(init)
 main.add_command(ls)

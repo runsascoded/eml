@@ -681,3 +681,137 @@ def fsck(folder: str, output_json: bool, show_missing: bool, verbose: bool, acco
 
     finally:
         client.disconnect()
+
+
+@click.command(name="index-fts")
+@require_init
+@option('-R', '--rebuild', is_flag=True, help="Rebuild entire FTS index from scratch")
+@option('-l', '--limit', type=int, help="Limit number of messages to process")
+@option('-v', '--verbose', is_flag=True, help="Show progress for each message")
+def index_fts(rebuild: bool, limit: int | None, verbose: bool):
+    """Build or update FTS (full-text search) index.
+
+    \b
+    Examples:
+      eml index-fts           # Update FTS for messages with local_path but no body_text
+      eml index-fts -R        # Rebuild entire FTS index from scratch
+      eml index-fts -l 100    # Process at most 100 messages
+
+    The FTS index enables full-text search across subject, body, from, and to fields.
+    New messages pulled after this update will be indexed automatically.
+    """
+    from email import policy
+    from email.parser import BytesParser
+    from pathlib import Path
+
+    from ..parsing import extract_body_text
+
+    root = get_eml_root()
+    pulls_db = get_pulls_db(root)
+    pulls_db.connect()
+
+    try:
+        if rebuild:
+            echo("Rebuilding FTS index from scratch...")
+            count = pulls_db.rebuild_fts_index()
+            echo(f"Indexed {count:,} messages")
+            return
+
+        # Find messages with local_path but missing FTS fields
+        cur = pulls_db.conn.execute("""
+            SELECT rowid, local_path, subject, from_addr, to_addr, body_text
+            FROM pulled_messages
+            WHERE local_path IS NOT NULL
+              AND (body_text IS NULL OR body_text = '')
+            ORDER BY rowid DESC
+        """ + (f" LIMIT {limit}" if limit else ""))
+
+        rows = cur.fetchall()
+        if not rows:
+            echo("No messages need FTS indexing")
+            return
+
+        echo(f"Processing {len(rows):,} messages...")
+
+        console = Console()
+        indexed = 0
+        skipped = 0
+        errors = 0
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Indexing FTS...", total=len(rows))
+
+            for row in rows:
+                rowid = row["rowid"]
+                local_path = row["local_path"]
+                subject = row["subject"]
+                from_addr = row["from_addr"]
+                to_addr = row["to_addr"]
+
+                progress.advance(task)
+
+                # Read .eml file and extract body
+                eml_path = root / local_path
+                if not eml_path.exists():
+                    if verbose:
+                        console.print(f"[yellow]Skip[/] {local_path} (file not found)")
+                    skipped += 1
+                    continue
+
+                try:
+                    raw = eml_path.read_bytes()
+                    body_text = extract_body_text(raw)
+
+                    # Also extract from/to if missing
+                    if not from_addr or not to_addr:
+                        msg = BytesParser(policy=policy.default).parsebytes(raw)
+                        if not from_addr:
+                            from_addr = msg.get("From", "")
+                        if not to_addr:
+                            to_addr = msg.get("To", "")
+
+                    # Update the main table
+                    pulls_db.conn.execute("""
+                        UPDATE pulled_messages
+                        SET from_addr = ?, to_addr = ?, body_text = ?
+                        WHERE rowid = ?
+                    """, (from_addr, to_addr, body_text, rowid))
+
+                    # Update FTS index
+                    pulls_db.conn.execute("DELETE FROM messages_fts WHERE rowid = ?", (rowid,))
+                    pulls_db.conn.execute("""
+                        INSERT INTO messages_fts(rowid, subject, body_text, from_addr, to_addr)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (rowid, subject, body_text, from_addr, to_addr))
+
+                    indexed += 1
+                    if verbose:
+                        console.print(f"[green]OK[/] {local_path[:60]}")
+
+                except Exception as e:
+                    errors += 1
+                    if verbose:
+                        console.print(f"[red]Error[/] {local_path}: {e}")
+
+                # Commit every 100 messages
+                if indexed % 100 == 0:
+                    pulls_db.conn.commit()
+
+            pulls_db.conn.commit()
+
+        echo()
+        echo(f"Indexed: {indexed:,}")
+        if skipped:
+            echo(style(f"Skipped: {skipped:,}", fg="yellow"))
+        if errors:
+            echo(style(f"Errors:  {errors:,}", fg="red"))
+
+    finally:
+        pulls_db.disconnect()

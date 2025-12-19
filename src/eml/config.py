@@ -1,5 +1,6 @@
 """V2 configuration and state management via YAML files."""
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -51,7 +52,18 @@ class FolderSyncState:
 
 
 def find_eml_root(start: Path | None = None) -> Path | None:
-    """Find eml project root (directory containing .eml/)."""
+    """Find eml project root (directory containing .eml/).
+
+    First checks EML_ROOT environment variable, then walks up from start/cwd.
+    """
+    # Check EML_ROOT env var first
+    env_root = os.environ.get("EML_ROOT")
+    if env_root:
+        env_path = Path(env_root).resolve()
+        if (env_path / EML_DIR).is_dir():
+            return env_path
+
+    # Fall back to walking up from start/cwd
     path = (start or Path.cwd()).resolve()
     while path != path.parent:
         if (path / EML_DIR).is_dir():

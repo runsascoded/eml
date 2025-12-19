@@ -88,6 +88,25 @@ export interface FolderDetail {
   sync_runs: SyncRun[]
 }
 
+export interface SearchResult {
+  account: string
+  folder: string
+  uid: number
+  message_id: string | null
+  subject: string | null
+  local_path: string | null
+  msg_date: string | null
+  from_addr: string | null
+  to_addr: string | null
+}
+
+export interface SearchResponse {
+  query: string
+  count: number
+  results: SearchResult[]
+  error?: string
+}
+
 export interface EmailAttachment {
   filename: string
   content_type: string
