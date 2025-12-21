@@ -17,4 +17,7 @@ export default defineConfig({
     outDir: 'dist',
     sourcemap: true,
   },
+  optimizeDeps: {
+    exclude: ['@rdub/use-url-params'],
+  },
 })
