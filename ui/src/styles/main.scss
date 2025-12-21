@@ -4,6 +4,11 @@
   box-sizing: border-box;
 }
 
+html {
+  min-height: 100%;
+  background: var(--bg-primary);
+}
+
 body {
   font-family: $font-family;
   background: var(--bg-primary);
@@ -11,6 +16,7 @@ body {
   margin: 0;
   padding: $spacing-lg;
   font-size: $font-size-base;
+  min-height: 100vh;
   transition: background-color 0.3s ease, color 0.3s ease;
 }
 
@@ -78,6 +84,12 @@ h1 {
     margin-top: 0;
     color: var(--accent);
     font-size: $font-size-lg;
+
+    .view-all-link {
+      float: right;
+      font-size: $font-size-sm;
+      font-weight: normal;
+    }
   }
 }
 

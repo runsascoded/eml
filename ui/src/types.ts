@@ -45,6 +45,7 @@ export interface HistogramEntry {
   hour: string
   new: number
   deduped: number
+  failed: number
 }
 
 export interface HistogramData {

@@ -4,7 +4,18 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ui</title>
+    <title>EML</title>
+    <script>
+      // Set theme immediately to prevent flash of wrong theme
+      (function() {
+        var stored = localStorage.getItem('eml-theme');
+        var theme = stored || 'system';
+        var actual = theme === 'system'
+          ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+          : theme;
+        document.documentElement.setAttribute('data-theme', actual);
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
