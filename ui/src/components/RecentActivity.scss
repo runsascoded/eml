@@ -17,6 +17,10 @@
   &.skipped {
     opacity: 0.7;
   }
+
+  &.failed {
+    opacity: 0.6;
+  }
 }
 
 .recent-time {
@@ -38,6 +42,11 @@
 .badge-skip {
   background: var(--badge-skip-bg);
   color: var(--badge-skip-text);
+}
+
+.badge-fail {
+  background: var(--error);
+  color: #fff;
 }
 
 .msg-date {

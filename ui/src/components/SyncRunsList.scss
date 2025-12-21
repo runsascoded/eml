@@ -10,18 +10,21 @@
   }
 
   &.compact .sync-run-item {
-    padding: 8px 12px;
+    padding: 8px 10px;
 
     .run-header {
-      font-size: 0.85rem;
+      font-size: 0.8rem;
+      flex-wrap: wrap;
     }
 
     .run-stats {
-      font-size: 0.75rem;
+      font-size: 0.7rem;
+      gap: 6px;
+      flex-wrap: wrap;
     }
 
     .run-time {
-      font-size: 0.7rem;
+      font-size: 0.65rem;
     }
   }
 }

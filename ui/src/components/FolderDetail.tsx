@@ -107,7 +107,7 @@ export function FolderDetail() {
               </thead>
               <tbody>
                 {data.messages.map((m) => (
-                  <tr key={m.uid} className={m.is_new ? 'new' : 'skipped'}>
+                  <tr key={m.uid} className={m.status === 'new' ? 'new' : 'skipped'}>
                     <td className="uid">{m.uid}</td>
                     <td className="subject">
                       {m.path ? (
@@ -118,8 +118,8 @@ export function FolderDetail() {
                     </td>
                     <td className="date">{m.msg_date || '-'}</td>
                     <td className="status">
-                      <span className={`status-pill ${m.is_new ? 'new' : 'skipped'}`}>
-                        {m.is_new ? 'new' : 'skipped'}
+                      <span className={`status-pill ${m.status || 'skipped'}`}>
+                        {m.status || 'skipped'}
                       </span>
                     </td>
                     <td className="pulled-at">{formatDate(m.pulled_at)}</td>

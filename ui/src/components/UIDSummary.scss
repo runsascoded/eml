@@ -5,15 +5,23 @@
     color: var(--error);
   }
 
+  .stat {
+    font-size: 1.5em;
+  }
+
   .stat.warning {
     color: var(--warning);
+  }
+
+  .stat-label {
+    font-size: 0.85em;
   }
 
   .no-mid {
     margin-top: 8px;
     padding-top: 8px;
     border-top: 1px solid var(--color-border);
-    font-size: 0.85rem;
+    font-size: 0.8rem;
     color: var(--color-text-muted);
   }
 }
