@@ -241,7 +241,8 @@ def status(color: bool, folder: tuple[str, ...]):
 @require_init
 @option('-h', '--host', default="127.0.0.1", help="Host to bind to")
 @option('-p', '--port', default=8765, type=int, help="Port to run on")
-def web(host: str, port: int):
+@option('-r', '--reload', 'reload_', is_flag=True, help="Enable hot reload for development")
+def web(host: str, port: int, reload_: bool):
     """Start status dashboard web UI.
 
     \b
@@ -258,7 +259,7 @@ def web(host: str, port: int):
     """
     try:
         from ..web import main as web_main
-        web_main(host=host, port=port)
+        web_main(host=host, port=port, reload=reload_)
     except ImportError as e:
         err(f"Failed to import web module: {e}")
         err("Make sure fastapi and uvicorn are installed: pip install fastapi uvicorn")

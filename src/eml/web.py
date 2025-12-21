@@ -141,13 +141,13 @@ def api_status(account: str = "y", folder: str = "Inbox"):
 
 @app.get("/api/histogram")
 def api_histogram(account: str | None = None, folder: str | None = None, hours: int = 24):
-    """Get hourly activity histogram with new vs deduped breakdown."""
+    """Get hourly activity histogram with new vs deduped vs failed breakdown."""
     root = get_root()
     with get_pulls_db(root) as db:
         data = db.get_activity_by_hour(account=account, folder=folder, limit_hours=hours)
         return {
             "hours": hours,
-            "data": [{"hour": h, "new": new, "deduped": deduped} for h, new, deduped in data],
+            "data": [{"hour": h, "new": new, "deduped": deduped, "failed": failed} for h, new, deduped, failed in data],
         }
 
 
@@ -322,19 +322,22 @@ def api_attachment(path: str, filename: str):
 @app.get("/api/sync-runs")
 def api_sync_runs(
     limit: int = 20,
+    offset: int = 0,
     account: str | None = None,
     folder: str | None = None,
     operation: str | None = None,
 ):
-    """Get recent sync runs (pull/push operations)."""
+    """Get recent sync runs (pull/push operations) with pagination."""
     root = get_root()
     with get_pulls_db(root) as db:
         runs = db.get_recent_sync_runs(
             limit=limit,
+            offset=offset,
             account=account,
             folder=folder,
             operation=operation,
         )
+        total = db.count_sync_runs(account=account, folder=folder, operation=operation)
         return {
             "runs": [
                 {
@@ -352,7 +355,10 @@ def api_sync_runs(
                     "error_message": r.error_message,
                 }
                 for r in runs
-            ]
+            ],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
         }
 
 
@@ -1116,13 +1122,17 @@ if _ui_dist_dir.exists():
     app.mount("/assets", StaticFiles(directory=_ui_dist_dir / "assets"), name="assets")
 
 
-def main(host: str = "127.0.0.1", port: int = 8765):
+def main(host: str = "127.0.0.1", port: int = 8765, reload: bool = False):
     """Run the web server."""
     ui_dist = Path(__file__).parent.parent.parent / "ui" / "dist"
     if not ui_dist.exists():
         print(f"Warning: UI not built. Run 'cd ui && pnpm build' first.")
     print(f"Starting EML web UI at http://{host}:{port}")
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    if reload:
+        # Use string import for reload to work properly
+        uvicorn.run("eml.web:app", host=host, port=port, log_level="warning", reload=True, reload_dirs=[str(Path(__file__).parent)])
+    else:
+        uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
 if __name__ == "__main__":
