@@ -2,6 +2,7 @@
 
 import atexit
 import sys
+from datetime import datetime
 
 import click
 from click import argument, echo, option, style
@@ -18,6 +19,7 @@ from rich.progress import (
 
 from ..config import AccountConfig, PullFailure, find_eml_root, load_config, load_failures, save_failures, get_failures_path
 from ..imap import IMAPClient
+from ..index import FileIndex
 from ..layouts.path_template import content_hash
 from ..parsing import extract_body_text
 from ..pulls import PullsDB, get_pulls_db
@@ -49,10 +51,12 @@ from .utils import (
 @option('-p', '--password', help="IMAP password (overrides account)")
 @option('-r', '--retry', is_flag=True, help="Retry previously failed UIDs only")
 @tag_option
+@option('-T', '--cache-ttl', type=int, default=60, help="UID cache TTL in minutes (default 60, 0 = always refresh)")
 @option('-u', '--user', help="IMAP username (overrides account)")
 @option('-v', '--verbose', is_flag=True, help="Show each message")
 @argument('account')
 def pull(
+    cache_ttl: int,
     checkpoint_interval: int,
     max_errors: int,
     folder: str | None,
@@ -123,8 +127,13 @@ def pull(
         # Open storage (V1 vs V2)
         layout = None
         storage = None
+        file_index: FileIndex | None = None
         if has_cfg:
             layout = get_storage_layout(root) if not dry_run else None
+            # Open FileIndex for incremental indexing of new messages
+            if not dry_run:
+                eml_dir = root / ".eml"
+                file_index = FileIndex(eml_dir)
         else:
             msgs_path = get_msgs_db_path()
             storage = MessageStorage(msgs_path)
@@ -157,10 +166,21 @@ def pull(
         if has_cfg and not dry_run:
             failures = load_failures(account, src_folder, root)
 
-        # Get UIDs to fetch - use cached server_uids if available
+        # Get UIDs to fetch - use cached server_uids if available and fresh
         cached_server_uids: set[int] = set()
+        cache_is_fresh = False
         if pulls_db and uidvalidity:
             cached_server_uids = pulls_db.get_server_uids(account, src_folder, uidvalidity)
+            if cached_server_uids and cache_ttl > 0:
+                # Check if cache is fresh based on TTL
+                folder_info = pulls_db.get_server_folder_info(account, src_folder)
+                if folder_info:
+                    _, _, last_checked_str = folder_info
+                    last_checked = datetime.fromisoformat(last_checked_str)
+                    cache_age_mins = (datetime.now() - last_checked).total_seconds() / 60
+                    cache_is_fresh = cache_age_mins < cache_ttl
+                    if not cache_is_fresh:
+                        echo(f"UID cache expired ({cache_age_mins:.0f}m > {cache_ttl}m TTL)")
 
         # Determine which UIDs to fetch
         if retry:
@@ -172,17 +192,25 @@ def pull(
             # Convert int UIDs to bytes (as returned by IMAP search)
             uids = [str(uid).encode() for uid in sorted(failures.keys())]
             echo(f"Retrying {len(uids)} failed UIDs")
-        elif cached_server_uids and not full:
+        elif cached_server_uids and cache_is_fresh and not full:
             # Use cached UIDs - much faster than IMAP SEARCH
             echo(f"Using cached server UIDs: {len(cached_server_uids):,}")
             unpulled = cached_server_uids - pulled_uids
             uids = [str(uid).encode() for uid in sorted(unpulled)]
             echo(f"Unpulled: {len(uids):,} UIDs")
         else:
-            # No cache or --full: fetch from server
+            # No cache, stale cache, or --full: fetch from server
             echo("Fetching UID list from server...")
             all_server_uids = client.search("ALL")
             echo(f"Server has {len(all_server_uids):,} messages")
+
+            # Cache the UIDs for next time
+            if pulls_db and uidvalidity and not dry_run:
+                uid_list = [(int(u), None) for u in all_server_uids]
+                pulls_db.record_server_uids(account, src_folder, uidvalidity, uid_list)
+                pulls_db.record_server_folder(account, src_folder, uidvalidity, len(all_server_uids))
+                echo(f"Cached {len(all_server_uids):,} UIDs (TTL: {cache_ttl}m)")
+
             if full:
                 echo("Full sync (--full) - will check all UIDs")
                 uids = all_server_uids
@@ -322,6 +350,9 @@ def pull(
                                 source_uid=str(uid_int),
                             )
                             local_path = str(stored_path.relative_to(root)) if stored_path else None
+                            # Incrementally index the new file
+                            if file_index and stored_path:
+                                file_index._index_file(stored_path)
                         else:
                             storage.add_message(
                                 message_id=info.message_id,
@@ -483,6 +514,9 @@ def pull(
         if not dry_run:
             if pulls_db:
                 pulls_db.disconnect()
+            if file_index:
+                file_index.conn.commit()
+                file_index.close()
             if has_cfg and layout and hasattr(layout, 'disconnect'):
                 layout.disconnect()
             elif not has_cfg and storage:

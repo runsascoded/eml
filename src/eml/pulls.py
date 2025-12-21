@@ -751,6 +751,28 @@ class PullsDB:
         """, (account, folder))
         return cur.fetchone()[0]
 
+    def get_server_folder_info(
+        self,
+        account: str,
+        folder: str,
+    ) -> tuple[int, int, str] | None:
+        """Get server folder metadata (uidvalidity, message_count, last_checked).
+
+        Returns:
+            Tuple of (uidvalidity, message_count, last_checked) or None if not found.
+        """
+        # Delegate to UidsDB if available
+        if self._uids_db:
+            return self._uids_db.get_server_folder_info(account, folder)
+        cur = self.conn.execute("""
+            SELECT uidvalidity, message_count, last_checked FROM server_folders
+            WHERE account = ? AND folder = ?
+        """, (account, folder))
+        row = cur.fetchone()
+        if row:
+            return (row["uidvalidity"], row["message_count"], row["last_checked"])
+        return None
+
     def get_unpulled_uids(
         self,
         account: str,
@@ -894,8 +916,8 @@ class PullsDB:
         account: str | None = None,
         folder: str | None = None,
         limit_hours: int = 24,
-    ) -> list[tuple[str, int, int]]:
-        """Get activity counts grouped by hour, split by new vs deduped.
+    ) -> list[tuple[str, int, int, int]]:
+        """Get activity counts grouped by hour, split by new vs deduped vs failed.
 
         Args:
             account: Optional account filter
@@ -903,7 +925,7 @@ class PullsDB:
             limit_hours: How many hours back to include
 
         Returns:
-            List of (hour_str, new_count, deduped_count) tuples
+            List of (hour_str, new_count, deduped_count, failed_count) tuples
         """
         cutoff = (datetime.now() - timedelta(hours=limit_hours)).isoformat()
 
@@ -921,15 +943,16 @@ class PullsDB:
         cur = self.conn.execute(f"""
             SELECT
                 strftime('%Y-%m-%d %H:00', pulled_at) as hour,
-                SUM(CASE WHEN status IS NULL OR status != 'skipped' THEN 1 ELSE 0 END) as new_count,
-                SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as deduped_count
+                SUM(CASE WHEN status IS NULL OR status = 'new' THEN 1 ELSE 0 END) as new_count,
+                SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as deduped_count,
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count
             FROM pulled_messages
             {where}
             GROUP BY hour
             ORDER BY hour DESC
         """, params)
 
-        return [(row["hour"], row["new_count"], row["deduped_count"]) for row in cur]
+        return [(row["hour"], row["new_count"], row["deduped_count"], row["failed_count"]) for row in cur]
 
     def get_pulls_by_day(
         self,
@@ -1116,6 +1139,7 @@ class PullsDB:
     def get_recent_sync_runs(
         self,
         limit: int = 20,
+        offset: int = 0,
         account: str | None = None,
         folder: str | None = None,
         operation: str | None = None,
@@ -1124,6 +1148,7 @@ class PullsDB:
 
         Args:
             limit: Max number to return
+            offset: Number to skip (for pagination)
             account: Optional account filter
             folder: Optional folder filter
             operation: Optional operation filter ('pull' or 'push')
@@ -1144,7 +1169,7 @@ class PullsDB:
             params.append(operation)
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        params.append(limit)
+        params.extend([limit, offset])
 
         cur = self.conn.execute(f"""
             SELECT id, operation, account, folder, started_at, ended_at,
@@ -1152,7 +1177,7 @@ class PullsDB:
             FROM sync_runs
             {where}
             ORDER BY started_at DESC
-            LIMIT ?
+            LIMIT ? OFFSET ?
         """, params)
 
         return [
@@ -1172,6 +1197,39 @@ class PullsDB:
             )
             for row in cur
         ]
+
+    def count_sync_runs(
+        self,
+        account: str | None = None,
+        folder: str | None = None,
+        operation: str | None = None,
+    ) -> int:
+        """Count total sync runs matching filters.
+
+        Args:
+            account: Optional account filter
+            folder: Optional folder filter
+            operation: Optional operation filter ('pull' or 'push')
+
+        Returns:
+            Total count of matching sync runs
+        """
+        conditions = []
+        params: list = []
+        if account:
+            conditions.append("account = ?")
+            params.append(account)
+        if folder:
+            conditions.append("folder = ?")
+            params.append(folder)
+        if operation:
+            conditions.append("operation = ?")
+            params.append(operation)
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        cur = self.conn.execute(f"SELECT COUNT(*) FROM sync_runs {where}", params)
+        return cur.fetchone()[0]
 
     def cleanup_stale_runs(self, max_age_minutes: int = 60) -> int:
         """Mark stale running sync runs as aborted.

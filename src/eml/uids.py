@@ -377,6 +377,25 @@ class UidsDB:
         """, (account, folder))
         return cur.fetchone()[0]
 
+    def get_server_folder_info(
+        self,
+        account: str,
+        folder: str,
+    ) -> tuple[int, int, str] | None:
+        """Get server folder metadata (uidvalidity, message_count, last_checked).
+
+        Returns:
+            Tuple of (uidvalidity, message_count, last_checked) or None if not found.
+        """
+        cur = self.conn.execute("""
+            SELECT uidvalidity, message_count, last_checked FROM server_folders
+            WHERE account = ? AND folder = ?
+        """, (account, folder))
+        row = cur.fetchone()
+        if row:
+            return (row["uidvalidity"], row["message_count"], row["last_checked"])
+        return None
+
     def get_unpulled_uids(
         self,
         account: str,
