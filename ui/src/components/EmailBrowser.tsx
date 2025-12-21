@@ -112,8 +112,8 @@ export function EmailBrowser() {
   const openSelected = useCallback(() => {
     if (threads.length > 0 && selectedIndex < threads.length) {
       const thread = threads[selectedIndex]
-      if (thread.thread_id) {
-        navigate(`/thread/${thread.thread_id}`)
+      if (thread.thread_slug) {
+        navigate(`/thread/${thread.thread_slug}`)
       } else {
         navigate(`/email/${thread.path}`)
       }
@@ -235,8 +235,8 @@ export function EmailBrowser() {
                 </thead>
                 <tbody>
                   {threads.map((thread, index) => {
-                    const threadUrl = thread.thread_id
-                      ? `/thread/${thread.thread_id}`
+                    const threadUrl = thread.thread_slug
+                      ? `/thread/${thread.thread_slug}`
                       : `/email/${thread.path}`
                     return (
                       <tr

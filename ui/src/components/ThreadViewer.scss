@@ -263,86 +263,21 @@
     }
 
     .message-body {
-      font-size: $font-size-base;
-      line-height: 1.6;
-      background: var(--email-body-bg);
-      color: var(--email-body-text);
-      border-radius: $radius-md;
-      padding: $spacing-md;
       margin-top: $spacing-sm;
 
+      // Plain text emails
       pre {
         white-space: pre-wrap;
         font-family: inherit;
         margin: 0;
+        font-size: $font-size-base;
+        line-height: 1.6;
+        color: var(--text-primary);
       }
 
-      img {
-        max-width: 100%;
-        height: auto;
-      }
-
-      a {
-        color: var(--accent);
-      }
-
-      // Force all text elements to use theme colors (overrides inline styles)
-      // This ensures readability in dark mode even when emails have dark text
-      &, * {
-        color: var(--email-body-text) !important;
-      }
-
-      // Preserve link colors
-      a, a * {
-        color: var(--accent) !important;
-      }
-
-      // Reset backgrounds that might be set inline
-      table, tr, td, th, div, span, p {
-        background-color: transparent !important;
-      }
-
-      // Allow actual background images/colors that are intentional design elements
-      // (e.g., buttons, badges) but reset pure white/light backgrounds
-      [style*="background"] {
-        // Let CSS filter handle contrast if needed
-      }
-
-      .email-body-with-quotes {
-        .quoted-section {
-          margin-top: $spacing-md;
-          border-top: 1px solid var(--border-color);
-          padding-top: $spacing-sm;
-
-          .toggle-quoted {
-            background: none;
-            border: none;
-            color: var(--text-muted);
-            cursor: pointer;
-            padding: $spacing-xs $spacing-sm;
-            font-size: $font-size-sm;
-            border-radius: $radius-sm;
-            transition: background-color 0.2s;
-
-            &:hover {
-              background: var(--bg-tertiary);
-              color: var(--text-secondary);
-            }
-          }
-
-          .quoted-content {
-            margin-top: $spacing-sm;
-            padding-left: $spacing-md;
-            border-left: 2px solid var(--border-color);
-            color: var(--text-muted);
-            font-size: $font-size-sm;
-
-            blockquote {
-              margin: 0;
-              padding-left: $spacing-sm;
-            }
-          }
-        }
+      // iframe for HTML emails is self-contained
+      iframe {
+        display: block;
       }
     }
 

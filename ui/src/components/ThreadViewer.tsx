@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { useUrlParam, type Param } from '@rdub/use-url-params'
@@ -39,99 +39,101 @@ const makeExpandedParam = (messageCount: number): Param<number[]> => ({
   },
 })
 
-// Component to render email body with collapsible quoted text
-function EmailBodyWithQuotes({ html, plain }: { html?: string; plain?: string }) {
-  const [showQuoted, setShowQuoted] = useState(false)
+// Sandboxed iframe component for rendering email HTML
+function SandboxedEmailHtml({ html, isDark }: { html: string; isDark: boolean }) {
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+  const [height, setHeight] = useState(400)
 
-  if (html) {
-    const quotedPatterns = [
-      /(<div class="gmail_quote">[\s\S]*$)/i,
-      /(<blockquote[\s\S]*$)/i,
-      /(<div[^>]*>On [^<]*wrote:[\s\S]*$)/i,
-      // Outlook-style: <hr> followed by From:/Sent:/To: headers
-      /(<hr[^>]*>\s*(?:<[^>]+>\s*)*(?:<b>)?From:[\s\S]*$)/i,
-      // Plain text "From:" after horizontal rule
-      /(_{3,}[\s\S]*?From:[\s\S]*$)/i,
-      // "----- Original Message -----" style
-      /(-{3,}\s*Original Message\s*-{3,}[\s\S]*$)/i,
-    ]
+  useEffect(() => {
+    const iframe = iframeRef.current
+    if (!iframe) return
 
-    let mainContent = html
-    let quotedContent = ''
-
-    for (const pattern of quotedPatterns) {
-      const match = html.match(pattern)
-      if (match && match.index !== undefined) {
-        mainContent = html.slice(0, match.index)
-        quotedContent = match[1]
-        break
+    const updateHeight = () => {
+      try {
+        const doc = iframe.contentDocument || iframe.contentWindow?.document
+        if (doc?.body) {
+          const newHeight = doc.body.scrollHeight
+          if (newHeight > 0) {
+            setHeight(newHeight + 20) // Add padding
+          }
+        }
+      } catch {
+        // Cross-origin issues shouldn't happen with srcdoc
       }
     }
 
-    if (quotedContent) {
-      return (
-        <div className="email-body-with-quotes">
-          <div dangerouslySetInnerHTML={{ __html: mainContent }} />
-          <div className="quoted-section">
-            <button
-              className="toggle-quoted"
-              onClick={() => setShowQuoted(!showQuoted)}
-            >
-              {showQuoted ? '▼ Hide quoted text' : '▶ Show quoted text'}
-            </button>
-            {showQuoted && (
-              <div
-                className="quoted-content"
-                dangerouslySetInnerHTML={{ __html: quotedContent }}
-              />
-            )}
-          </div>
-        </div>
-      )
-    }
+    iframe.onload = updateHeight
+    // Also check after images load
+    const checkInterval = setInterval(updateHeight, 500)
+    setTimeout(() => clearInterval(checkInterval), 5000)
 
-    return <div dangerouslySetInnerHTML={{ __html: html }} />
+    return () => clearInterval(checkInterval)
+  }, [html, isDark])
+
+  // Theme-adaptive styles for email content
+  const bgColor = isDark ? '#333333' : '#ffffff'
+  const textColor = isDark ? '#ffffff' : '#1f2328'
+  const linkColor = isDark ? '#6cb6ff' : '#0969da'
+
+  // Wrap HTML with base styles that adapt to dark mode
+  const wrappedHtml = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <style>
+        html, body {
+          margin: 0;
+          padding: 8px;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          font-size: 16px;
+          line-height: 1.6;
+          background: ${bgColor};
+          color: ${textColor};
+        }
+        img { max-width: 100%; height: auto; }
+        a { color: ${linkColor}; }
+        /* Force text colors in dark mode to override inline styles */
+        ${isDark ? `
+        *, *::before, *::after {
+          color: ${textColor} !important;
+          border-color: #666 !important;
+        }
+        a, a * { color: ${linkColor} !important; }
+        table, tr, td, th, div, span, p {
+          background-color: transparent !important;
+        }
+        ` : ''}
+      </style>
+    </head>
+    <body>${html}</body>
+    </html>
+  `
+
+  return (
+    <iframe
+      ref={iframeRef}
+      srcDoc={wrappedHtml}
+      sandbox="allow-same-origin"
+      style={{
+        width: '100%',
+        height: `${height}px`,
+        border: 'none',
+        borderRadius: '4px',
+      }}
+      title="Email content"
+    />
+  )
+}
+
+// Component to render email body
+function EmailBodyWithQuotes({ html, plain, isDark }: { html?: string; plain?: string; isDark: boolean }) {
+  if (html) {
+    // Use sandboxed iframe for HTML emails to prevent style leakage
+    return <SandboxedEmailHtml html={html} isDark={isDark} />
   }
 
   if (plain) {
-    const lines = plain.split('\n')
-    const mainLines: string[] = []
-    const quotedLines: string[] = []
-    let inQuoted = false
-
-    for (const line of lines) {
-      if (!inQuoted && /^On .* wrote:$/.test(line.trim())) {
-        inQuoted = true
-        quotedLines.push(line)
-      } else if (line.startsWith('>')) {
-        inQuoted = true
-        quotedLines.push(line)
-      } else if (inQuoted) {
-        quotedLines.push(line)
-      } else {
-        mainLines.push(line)
-      }
-    }
-
-    if (quotedLines.length > 0) {
-      return (
-        <div className="email-body-with-quotes">
-          <pre>{mainLines.join('\n')}</pre>
-          <div className="quoted-section">
-            <button
-              className="toggle-quoted"
-              onClick={() => setShowQuoted(!showQuoted)}
-            >
-              {showQuoted ? '▼ Hide quoted text' : '▶ Show quoted text'}
-            </button>
-            {showQuoted && (
-              <pre className="quoted-content">{quotedLines.join('\n')}</pre>
-            )}
-          </div>
-        </div>
-      )
-    }
-
     return <pre>{plain}</pre>
   }
 
@@ -332,12 +334,14 @@ function MessageCard({
   isExpanded,
   onToggle,
   uiStyle,
+  isDark,
 }: {
   msg: ThreadMessage
   idx: number
   isExpanded: boolean
   onToggle: () => void
   uiStyle: string
+  isDark: boolean
 }) {
   // Fetch email content when expanded and has local_path
   const { data: emailData, isLoading, error } = useQuery({
@@ -444,6 +448,7 @@ function MessageCard({
                 <EmailBodyWithQuotes
                   html={emailData.body_html}
                   plain={emailData.body_plain}
+                  isDark={isDark}
                 />
               </div>
               {emailData.attachments.length > 0 && (
@@ -496,7 +501,8 @@ function MessageCard({
 
 export function ThreadViewer() {
   const { '*': threadId } = useParams()
-  const { uiStyle } = useTheme()
+  const { uiStyle, actualTheme } = useTheme()
+  const isDark = actualTheme === 'dark'
 
   // Fetch thread data
   const { data: thread, isLoading, error } = useQuery({
@@ -587,6 +593,7 @@ export function ThreadViewer() {
             isExpanded={expandedMessages.has(idx)}
             onToggle={() => toggleMessage(idx)}
             uiStyle={uiStyle}
+            isDark={isDark}
           />
         ))}
       </div>
