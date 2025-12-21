@@ -49,9 +49,9 @@ export function Dashboard() {
       <div className="header-row">
         <h1>
           <span className="live-indicator" />
-          EML Status
+          EML Admin
         </h1>
-        <Link to="/browse" className="browse-link">Browse Emails</Link>
+        <Link to="/" className="browse-link">Back to Inbox</Link>
       </div>
       <FolderNav
         folders={folders}

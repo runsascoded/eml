@@ -691,38 +691,106 @@ def api_cleanup_stale_runs(max_age_minutes: int = 60):
         return {"status": "ok", "cleaned": count}
 
 
+def _is_year_dir(name: str) -> bool:
+    """Check if directory name looks like a year (YYYY)."""
+    return len(name) == 4 and name.isdigit() and 1990 <= int(name) <= 2100
+
+
+def _find_folder_roots(account_path: Path) -> list[Path]:
+    """Find IMAP folder root directories within an account.
+
+    A folder root is a directory that contains year (YYYY) subdirectories,
+    indicating the start of our date-organized .eml tree.
+
+    This handles nested IMAP folders like "Inbox/Subfolder" where the
+    folder path is "Inbox/Subfolder" and it contains "2023/09/11/*.eml".
+    """
+    folder_roots = []
+
+    def walk(path: Path, depth: int = 0):
+        if depth > 10:  # Safety limit
+            return
+
+        if not path.is_dir():
+            return
+
+        # Check if this directory contains year subdirectories
+        has_year_child = any(
+            _is_year_dir(child.name) and child.is_dir()
+            for child in path.iterdir()
+            if not child.name.startswith(".")
+        )
+
+        if has_year_child:
+            # This is a folder root
+            folder_roots.append(path)
+        else:
+            # Keep looking in subdirectories
+            for child in path.iterdir():
+                if child.is_dir() and not child.name.startswith("."):
+                    walk(child, depth + 1)
+
+    walk(account_path)
+    return folder_roots
+
+
 @app.get("/api/fs-folders")
 def api_fs_folders(account: str | None = None):
     """Get folders from filesystem layout (not pulls.db).
 
     This lists folders that exist on disk, which may differ from
     what's tracked in pulls.db (e.g., v1 pulls without db tracking).
+
+    Folders are identified by finding directories that contain YYYY
+    subdirectories (our date-organized .eml tree structure).
+
+    Supports two layouts:
+    1. Single-account: <root>/<folder>/YYYY/... (account defaults to "_")
+    2. Multi-account: <root>/<account>/<folder>/YYYY/...
     """
     root = get_root()
 
     folders = []
-    # List top-level directories (accounts)
-    for path in root.iterdir():
-        if not path.is_dir() or path.name.startswith("."):
-            continue
-        acct = path.name
-        if account and acct != account:
-            continue
 
-        # List subfolders (IMAP folders)
-        for folder_path in path.iterdir():
-            if not folder_path.is_dir() or folder_path.name.startswith("."):
-                continue
+    # First check if root itself contains folder roots (single-account layout)
+    # by looking for directories with YYYY children directly under root
+    root_folder_roots = _find_folder_roots(root)
+    if root_folder_roots:
+        # Single-account layout - folders are directly under root
+        default_account = "_"
+        if account and account != default_account:
+            return {"folders": []}
 
-            # Count .eml files (recursively for date-organized layouts)
+        for folder_path in root_folder_roots:
+            folder_name = str(folder_path.relative_to(root))
             eml_count = len(list(folder_path.rglob("*.eml")))
             if eml_count > 0:
                 folders.append({
-                    "account": acct,
-                    "folder": folder_path.name,
+                    "account": default_account,
+                    "folder": folder_name,
                     "path": str(folder_path.relative_to(root)),
                     "eml_count": eml_count,
                 })
+    else:
+        # Multi-account layout - look for account directories
+        for path in root.iterdir():
+            if not path.is_dir() or path.name.startswith("."):
+                continue
+            acct = path.name
+            if account and acct != account:
+                continue
+
+            # Find folder roots (directories with YYYY children)
+            for folder_path in _find_folder_roots(path):
+                folder_name = str(folder_path.relative_to(path))
+                eml_count = len(list(folder_path.rglob("*.eml")))
+                if eml_count > 0:
+                    folders.append({
+                        "account": acct,
+                        "folder": folder_name,
+                        "path": str(folder_path.relative_to(root)),
+                        "eml_count": eml_count,
+                    })
 
     # Sort by account, then folder name
     folders.sort(key=lambda x: (x["account"], x["folder"]))
@@ -730,7 +798,7 @@ def api_fs_folders(account: str | None = None):
     return {"folders": folders}
 
 
-@app.get("/api/fs-emails/{account}/{folder}")
+@app.get("/api/fs-emails/{account}/{folder:path}")
 def api_fs_emails(
     account: str,
     folder: str,
@@ -741,8 +809,8 @@ def api_fs_emails(
     """List emails in a folder from filesystem.
 
     Args:
-        account: Account/folder name (e.g., "Inbox")
-        folder: Subfolder name (e.g., "2025")
+        account: Account name (e.g., "y" or "_" for single-account repos)
+        folder: Folder path, may contain slashes (e.g., "Inbox" or "Inbox/Subfolder")
         limit: Max emails to return
         offset: Offset for pagination
         sort: Sort order ("date_desc", "date_asc", "name")
@@ -750,7 +818,11 @@ def api_fs_emails(
     from email import policy
 
     root = get_root()
-    folder_path = root / account / folder
+    # For single-account repos, account="_" means folder is directly under root
+    if account == "_":
+        folder_path = root / folder
+    else:
+        folder_path = root / account / folder
 
     # Security check
     try:

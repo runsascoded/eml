@@ -19,14 +19,63 @@
         text-decoration: underline;
       }
     }
+
+    .admin-link {
+      margin-left: auto;
+      font-size: 0.8rem;
+      opacity: 0.7;
+
+      &:hover {
+        opacity: 1;
+      }
+    }
   }
 
   .browser-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
     margin-bottom: 24px;
 
-    h1 {
-      margin: 0 0 8px;
-      font-size: 1.5rem;
+    .search-form {
+      display: flex;
+      flex: 1;
+      max-width: 500px;
+      gap: 8px;
+
+      .search-input {
+        flex: 1;
+        padding: 10px 14px;
+        border: 1px solid var(--color-border);
+        border-radius: 6px;
+        font-size: 0.95rem;
+        background: var(--color-surface);
+        color: inherit;
+
+        &:focus {
+          outline: none;
+          border-color: var(--color-primary);
+          box-shadow: 0 0 0 2px rgba(var(--color-primary-rgb, 0, 100, 200), 0.2);
+        }
+
+        &::placeholder {
+          color: var(--color-text-muted);
+        }
+      }
+
+      .search-button {
+        padding: 10px 18px;
+        background: var(--color-primary);
+        color: white;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        font-weight: 500;
+
+        &:hover {
+          opacity: 0.9;
+        }
+      }
     }
 
     .folder-info {
@@ -35,16 +84,15 @@
       gap: 12px;
       color: var(--color-text-muted);
       margin: 0;
+      margin-left: auto;
 
-      code {
-        background: var(--color-surface);
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-size: 0.9rem;
+      .folder-name {
+        font-weight: 600;
+        color: inherit;
       }
 
       .count {
-        font-weight: 600;
+        font-size: 0.9rem;
       }
     }
   }
@@ -155,6 +203,14 @@
       background: var(--color-surface-hover);
     }
 
+    tr.selected td {
+      background: var(--color-surface-hover);
+
+      &:first-child {
+        box-shadow: inset 3px 0 0 var(--color-primary);
+      }
+    }
+
     .subject {
       max-width: 400px;
 
@@ -202,6 +258,7 @@
       border: 1px solid var(--color-border);
       border-radius: 4px;
       background: var(--color-surface);
+      color: inherit;
       cursor: pointer;
 
       &:hover:not(:disabled) {

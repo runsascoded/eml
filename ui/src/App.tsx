@@ -14,13 +14,15 @@ function App() {
     <ThemeProvider>
       <BrowserRouter>
         <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/browse" element={<EmailBrowser />} />
-          <Route path="/browse/:account/:folder" element={<EmailBrowser />} />
-          <Route path="/folder/:account/:folder" element={<FolderDetail />} />
+          {/* Main email browser routes */}
+          <Route path="/" element={<EmailBrowser />} />
+          <Route path="/folder/:account/*" element={<EmailBrowser />} />
           <Route path="/email/*" element={<EmailViewer />} />
           <Route path="/thread/*" element={<ThreadViewer />} />
-          <Route path="/sync/:runId" element={<SyncRunDetail />} />
+          {/* Admin/sync routes */}
+          <Route path="/admin" element={<Dashboard />} />
+          <Route path="/admin/folder/:account/:folder" element={<FolderDetail />} />
+          <Route path="/admin/sync/:runId" element={<SyncRunDetail />} />
         </Routes>
         <ThemeToggle />
       </BrowserRouter>

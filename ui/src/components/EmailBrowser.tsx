@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react'
-import { useParams, Link, useSearchParams } from 'react-router-dom'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { useParams, Link, useSearchParams, useNavigate } from 'react-router-dom'
+import { useHotkeys, ShortcutsModal } from '@rdub/use-hotkeys'
 import type { FSFolder, FSEmail } from '../types'
 import './EmailBrowser.scss'
 
@@ -19,14 +20,40 @@ function formatDate(dateStr: string): string {
   }
 }
 
+const HOTKEYS = {
+  'j': 'nav:down',
+  'k': 'nav:up',
+  'enter': 'nav:open',
+  'o': 'nav:open',
+  '/': 'nav:search',
+  'g i': 'nav:inbox',
+  'n': 'nav:nextPage',
+  'p': 'nav:prevPage',
+}
+
+const HOTKEY_DESCRIPTIONS = {
+  'nav:down': 'Next email',
+  'nav:up': 'Previous email',
+  'nav:open': 'Open email',
+  'nav:search': 'Focus search',
+  'nav:inbox': 'Go to Inbox',
+  'nav:nextPage': 'Next page',
+  'nav:prevPage': 'Previous page',
+}
+
 export function EmailBrowser() {
-  const { account, folder } = useParams<{ account?: string; folder?: string }>()
+  const { account, '*': folderPath } = useParams<{ account?: string; '*'?: string }>()
+  const folder = folderPath || undefined  // Convert empty string to undefined
   const [searchParams, setSearchParams] = useSearchParams()
+  const navigate = useNavigate()
   const [folders, setFolders] = useState<FSFolder[]>([])
   const [emails, setEmails] = useState<FSEmail[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [selectedIndex, setSelectedIndex] = useState(0)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const [searchQuery, setSearchQuery] = useState('')
 
   const page = parseInt(searchParams.get('page') || '1', 10)
   const limit = 50
@@ -51,7 +78,7 @@ export function EmailBrowser() {
     setLoading(true)
     setError(null)
 
-    fetch(`/api/fs-emails/${encodeURIComponent(account)}/${encodeURIComponent(folder)}?limit=${limit}&offset=${offset}`)
+    fetch(`/api/fs-emails/${encodeURIComponent(account)}/${folder}?limit=${limit}&offset=${offset}`)
       .then(res => res.json())
       .then(data => {
         if (data.error) {
@@ -76,6 +103,35 @@ export function EmailBrowser() {
     setSearchParams({ page: String(newPage) })
   }
 
+  // Reset selection when emails change
+  useEffect(() => {
+    setSelectedIndex(0)
+  }, [emails])
+
+  // Hotkey handlers
+  const openSelected = useCallback(() => {
+    if (emails.length > 0 && selectedIndex < emails.length) {
+      navigate(`/email/${emails[selectedIndex].path}`)
+    }
+  }, [emails, selectedIndex, navigate])
+
+  useHotkeys(HOTKEYS, {
+    'nav:down': () => setSelectedIndex(i => Math.min(i + 1, emails.length - 1)),
+    'nav:up': () => setSelectedIndex(i => Math.max(i - 1, 0)),
+    'nav:open': openSelected,
+    'nav:search': () => searchInputRef.current?.focus(),
+    'nav:inbox': () => navigate('/folder/y/Inbox'),
+    'nav:nextPage': () => page < totalPages && handlePageChange(page + 1),
+    'nav:prevPage': () => page > 1 && handlePageChange(page - 1),
+  })
+
+  const handleSearch = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (searchQuery.trim()) {
+      navigate(`/thread/search?q=${encodeURIComponent(searchQuery.trim())}`)
+    }
+  }
+
   // Group folders by account
   const foldersByAccount: Record<string, FSFolder[]> = {}
   for (const f of folders) {
@@ -88,28 +144,37 @@ export function EmailBrowser() {
   return (
     <div className="email-browser">
       <nav className="breadcrumb">
-        <Link to="/">Dashboard</Link>
-        <span>/</span>
-        <span>Browse</span>
-        {account && (
+        <Link to="/">Inbox</Link>
+        {account && folder && account !== 'y' && (
           <>
             <span>/</span>
             <span>{account}</span>
           </>
         )}
-        {folder && (
+        {folder && folder !== 'Inbox' && (
           <>
             <span>/</span>
             <span>{folder}</span>
           </>
         )}
+        <Link to="/admin" className="admin-link">Admin</Link>
       </nav>
 
       <header className="browser-header">
-        <h1>Email Browser</h1>
+        <form className="search-form" onSubmit={handleSearch}>
+          <input
+            ref={searchInputRef}
+            type="text"
+            placeholder="Search emails... (press /)"
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            className="search-input"
+          />
+          <button type="submit" className="search-button">Search</button>
+        </form>
         {account && folder && (
           <p className="folder-info">
-            <code>{account}/{folder}</code>
+            <span className="folder-name">{folder}</span>
             {total > 0 && <span className="count">{total.toLocaleString()} emails</span>}
           </p>
         )}
@@ -127,7 +192,7 @@ export function EmailBrowser() {
                   return (
                     <li key={`${f.account}-${f.folder}`}>
                       <Link
-                        to={`/browse/${encodeURIComponent(f.account)}/${encodeURIComponent(f.folder)}`}
+                        to={`/folder/${encodeURIComponent(f.account)}/${f.folder}`}
                         className={isActive ? 'active' : ''}
                       >
                         {f.folder}
@@ -164,8 +229,13 @@ export function EmailBrowser() {
                   </tr>
                 </thead>
                 <tbody>
-                  {emails.map(email => (
-                    <tr key={email.path}>
+                  {emails.map((email, index) => (
+                    <tr
+                      key={email.path}
+                      className={index === selectedIndex ? 'selected' : ''}
+                      onClick={() => setSelectedIndex(index)}
+                      onDoubleClick={() => navigate(`/email/${email.path}`)}
+                    >
                       <td className="subject">
                         <Link to={`/email/${email.path}`}>{email.subject || '(no subject)'}</Link>
                       </td>
@@ -200,6 +270,7 @@ export function EmailBrowser() {
           )}
         </main>
       </div>
+      <ShortcutsModal keymap={HOTKEYS} descriptions={HOTKEY_DESCRIPTIONS} />
     </div>
   )
 }

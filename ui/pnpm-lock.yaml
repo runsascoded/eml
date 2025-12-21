@@ -20,6 +20,9 @@ importers:
       '@mui/material':
         specifier: ^7.3.6
         version: 7.3.6(@emotion/react@11.14.0(@types/react@19.2.7)(react@19.2.3))(@emotion/styled@11.14.1(@emotion/react@11.14.0(@types/react@19.2.7)(react@19.2.3))(@types/react@19.2.7)(react@19.2.3))(@types/react@19.2.7)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
+      '@rdub/use-hotkeys':
+        specifier: ^0.2.0
+        version: 0.2.0(react@19.2.3)
       '@rdub/use-url-params':
         specifier: workspace:*
         version: link:../../../js/use-url-params
@@ -789,6 +792,11 @@ packages:
 
   '@popperjs/core@2.11.8':
     resolution: {integrity: sha512-P1st0aksCrn9sGZhp8GMYwBnQsbvAWsZAX44oXNNvLHGqAOcoVxmjZiohstwQ7SqKnbR47akdNi+uleWD8+g6A==}
+
+  '@rdub/use-hotkeys@0.2.0':
+    resolution: {integrity: sha512-mNZIcPQFwNXd+t1hDnsEKZE8WrjXW9l7WBEWojyxqHZ+JRdCVWOBjH3sek4HePckzQ3Wignww7uPAgoDIXjNeQ==}
+    peerDependencies:
+      react: '>=18.0.0'
 
   '@rolldown/pluginutils@1.0.0-beta.53':
     resolution: {integrity: sha512-vENRlFU4YbrwVqNDZ7fLvy+JR1CRkyr01jhSiDpE1u6py3OMzQfztQU2jxykW3ALNxO4kSlqIDeYyD0Y9RcQeQ==}
@@ -2585,6 +2593,10 @@ snapshots:
     optional: true
 
   '@popperjs/core@2.11.8': {}
+
+  '@rdub/use-hotkeys@0.2.0(react@19.2.3)':
+    dependencies:
+      react: 19.2.3
 
   '@rolldown/pluginutils@1.0.0-beta.53': {}
 
