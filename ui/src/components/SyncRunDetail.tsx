@@ -46,6 +46,7 @@ export function SyncRunDetail() {
           <span className="operation">{run.operation}</span>
           <code className="folder">{run.account}/{run.folder}</code>
           <span className={`status-badge status-${run.status}`}>{run.status}</span>
+          {run.status === 'running' && <span className="live-indicator" title="Live updates enabled" />}
         </h1>
       </header>
 

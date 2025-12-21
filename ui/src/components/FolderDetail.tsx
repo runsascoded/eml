@@ -8,8 +8,10 @@ function formatDate(iso: string): string {
 }
 
 export function FolderDetail() {
-  const { account, folder } = useParams<{ account: string; folder: string }>()
-  const { data, loading } = useFolderDetail(account || null, folder || null)
+  const { folder } = useParams<{ folder: string }>()
+  // Use "_" as the account for single-account FS-based layout
+  const account = '_'
+  const { data, loading } = useFolderDetail(account, folder || null)
   const { folders } = useFolders()
 
   if (loading && !data) {
@@ -28,17 +30,13 @@ export function FolderDetail() {
   return (
     <div className="folder-detail">
       <nav className="breadcrumb">
-        <Link to="/">Dashboard</Link>
-        <span>/</span>
-        <span>{data.account}</span>
+        <Link to="/admin">Dashboard</Link>
         <span>/</span>
         <span>{data.folder}</span>
       </nav>
 
       <header className="folder-header">
         <h1>
-          <span className="account">{data.account}</span>
-          <span className="separator">/</span>
           <span className="folder-name">{data.folder}</span>
         </h1>
       </header>
@@ -47,11 +45,11 @@ export function FolderDetail() {
         <h3>Folders</h3>
         <ul className="folder-list">
           {folders.map((f) => {
-            const isActive = f.account === data.account && f.folder === data.folder
+            const isActive = f.folder === data.folder
             return (
-              <li key={`${f.account}-${f.folder}`}>
+              <li key={f.folder}>
                 <Link
-                  to={`/folder/${f.account}/${encodeURIComponent(f.folder)}`}
+                  to={`/admin/folder/${encodeURIComponent(f.folder)}`}
                   className={isActive ? 'active' : ''}
                 >
                   {f.folder}

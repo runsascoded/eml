@@ -82,7 +82,9 @@ def pull(
     acct = get_account_any(account)
     if not acct:
         err(f"Account '{account}' not found.")
-        err("  eml account add g/user gmail user@gmail.com")
+        err("Available accounts: eml accounts")
+        err("Add an account: eml account add <name> <type> <user> -p <password>")
+        err("Example: eml account add y yahoo user@yahoo.com -p 'app-password'")
         sys.exit(1)
 
     src_type = acct.type
@@ -134,6 +136,7 @@ def pull(
             if not dry_run:
                 eml_dir = root / ".eml"
                 file_index = FileIndex(eml_dir)
+                file_index.connect()
         else:
             msgs_path = get_msgs_db_path()
             storage = MessageStorage(msgs_path)
@@ -516,14 +519,41 @@ def pull(
                 pulls_db.disconnect()
             if file_index:
                 file_index.conn.commit()
-                file_index.close()
+                file_index.disconnect()
             if has_cfg and layout and hasattr(layout, 'disconnect'):
                 layout.disconnect()
             elif not has_cfg and storage:
                 storage.disconnect()
 
+    except ConnectionRefusedError as e:
+        err(f"Connection refused: {e}")
+        err(f"  Check that the IMAP server '{client.host}:{client.port}' is accessible")
+        err("  Common issues: firewall blocking, wrong port, server down")
+        sys.exit(1)
+    except TimeoutError as e:
+        err(f"Connection timed out: {e}")
+        err(f"  Server '{client.host}:{client.port}' is not responding")
+        err("  Check network connectivity and server status")
+        sys.exit(1)
     except Exception as e:
+        error_str = str(e)
         err(f"Error: {e}")
+        # Provide helpful context for common IMAP errors
+        if "authentication" in error_str.lower() or "login" in error_str.lower():
+            err("  Authentication failed - check username and password")
+            err("  For Yahoo: ensure you're using an app-specific password")
+            err("  For Gmail: enable less secure apps or use OAuth")
+        elif "not connected" in error_str.lower():
+            err("  IMAP connection was lost or never established")
+            err("  Check network connectivity and retry")
+        elif "folder" in error_str.lower() and "not found" in error_str.lower():
+            err(f"  The folder '{src_folder}' does not exist on this server")
+            err("  Use 'eml folders <account>' to list available folders")
+        elif "rate" in error_str.lower() or "limit" in error_str.lower():
+            err("  Rate limited by server - wait and retry later")
+        elif "ssl" in error_str.lower() or "tls" in error_str.lower():
+            err("  SSL/TLS connection error")
+            err("  Check that the server supports encrypted connections")
         sys.exit(1)
     finally:
         client.disconnect()

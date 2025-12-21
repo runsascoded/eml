@@ -19,10 +19,11 @@ export function useFolders() {
   return { folders, refresh }
 }
 
-export function useStatus(account: string, folder: string | null) {
+export function useStatus(account: string | null, folder: string | null) {
   const [status, setStatus] = useState<UIDStatus | null>(null)
 
   const refresh = useCallback(async () => {
+    if (!account) return
     const params = new URLSearchParams()
     params.set('account', account)
     if (folder) params.set('folder', folder)
@@ -38,10 +39,11 @@ export function useStatus(account: string, folder: string | null) {
   return { status, refresh }
 }
 
-export function useRecent(account: string, folder: string | null) {
+export function useRecent(account: string | null, folder: string | null) {
   const [pulls, setPulls] = useState<PullActivity[]>([])
 
   const refresh = useCallback(async () => {
+    if (!account) return
     const params = new URLSearchParams()
     params.set('account', account)
     if (folder) params.set('folder', folder)
@@ -57,10 +59,11 @@ export function useRecent(account: string, folder: string | null) {
   return { pulls, refresh }
 }
 
-export function useHistogram(account: string, folder: string | null) {
+export function useHistogram(account: string | null, folder: string | null) {
   const [data, setData] = useState<HistogramData | null>(null)
 
   const refresh = useCallback(async () => {
+    if (!account) return
     const params = new URLSearchParams()
     params.set('account', account)
     if (folder) params.set('folder', folder)
@@ -163,7 +166,7 @@ export function useSyncRunsPaginated(limit = 20, offset = 0) {
   return { runs, total, loading, refresh }
 }
 
-export function useSyncRunDetail(runId: number | null) {
+export function useSyncRunDetail(runId: number | null, liveUpdate = true) {
   const [run, setRun] = useState<SyncRun | null>(null)
   const [messages, setMessages] = useState<SyncRunMessage[]>([])
   const [loading, setLoading] = useState(false)
@@ -181,6 +184,30 @@ export function useSyncRunDetail(runId: number | null) {
   useEffect(() => {
     refresh()
   }, [refresh])
+
+  // Subscribe to SSE for live updates when the sync run is in progress
+  useEffect(() => {
+    if (!runId || !liveUpdate || (run && run.status !== 'running')) return
+
+    const evtSource = new EventSource('/api/stream')
+
+    // Listen for sync updates (run status changes)
+    evtSource.addEventListener('sync', () => {
+      refresh()
+    })
+
+    // Listen for message pulls (new messages added)
+    evtSource.addEventListener('recent', () => {
+      refresh()
+    })
+
+    evtSource.onerror = () => {
+      console.log('SSE connection lost, reconnecting...')
+      evtSource.close()
+    }
+
+    return () => evtSource.close()
+  }, [runId, liveUpdate, run?.status, refresh])
 
   return { run, messages, loading, refresh }
 }

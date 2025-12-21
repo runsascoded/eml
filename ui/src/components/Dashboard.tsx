@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { FolderNav } from './FolderNav'
 import { SyncStatusBar } from './SyncStatusBar'
@@ -11,11 +11,19 @@ import { useFolders, useStatus, useRecent, useHistogram, useSyncStatus, useSyncR
 import type { UIDStatus, PullActivity, SyncStatus } from '../types'
 
 export function Dashboard() {
-  const [account, setAccount] = useState('y')
+  // Account is derived from the folders list (first account found)
+  const [account, setAccount] = useState<string | null>(null)
   const [folder, setFolder] = useState<string | null>(null)  // null = All folders
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null)
 
   const { folders } = useFolders()
+
+  // Set account from first folder when folders load
+  useEffect(() => {
+    if (folders.length > 0 && !account) {
+      setAccount(folders[0].account)
+    }
+  }, [folders, account])
   const { status, refresh: refreshStatus } = useStatus(account, folder)
   const { pulls, refresh: refreshRecent } = useRecent(account, folder)
   const { data: histogramData } = useHistogram(account, folder)

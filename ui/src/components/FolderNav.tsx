@@ -4,7 +4,7 @@ import './FolderNav.scss'
 
 interface Props {
   folders: Folder[]
-  currentAccount: string
+  currentAccount: string | null  // null until loaded
   currentFolder: string | null  // null means "All"
   onSelect?: (account: string, folder: string | null) => void
   linkMode?: boolean
@@ -23,7 +23,7 @@ export function FolderNav({ folders, currentAccount, currentFolder, onSelect, li
 
   return (
     <div className="folder-nav">
-      {showAll && (
+      {showAll && currentAccount && (
         <button
           className={`folder-btn ${currentFolder === null ? 'active' : ''}`}
           onClick={() => onSelect?.(currentAccount, null)}
@@ -37,8 +37,8 @@ export function FolderNav({ folders, currentAccount, currentFolder, onSelect, li
         if (linkMode) {
           return (
             <Link
-              key={`${f.account}-${f.folder}`}
-              to={`/folder/${f.account}/${encodeURIComponent(f.folder)}`}
+              key={f.folder}
+              to={`/folder/${encodeURIComponent(f.folder)}`}
               className={`folder-btn ${isActive ? 'active' : ''}`}
             >
               {f.folder}

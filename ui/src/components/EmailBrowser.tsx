@@ -42,8 +42,10 @@ const HOTKEY_DESCRIPTIONS = {
 }
 
 export function EmailBrowser() {
-  const { account, '*': folderPath } = useParams<{ account?: string; '*'?: string }>()
+  const { '*': folderPath } = useParams<{ '*'?: string }>()
   const folder = folderPath || undefined  // Convert empty string to undefined
+  // Always use "_" for single-account FS-based layout (API convention)
+  const account = '_'
   const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
   const [folders, setFolders] = useState<FSFolder[]>([])
@@ -67,9 +69,9 @@ export function EmailBrowser() {
       .catch(err => console.error('Failed to load folders:', err))
   }, [])
 
-  // Fetch threads when account/folder changes
+  // Fetch threads when folder changes
   useEffect(() => {
-    if (!account || !folder) {
+    if (!folder) {
       setThreads([])
       setTotal(0)
       return
@@ -95,7 +97,7 @@ export function EmailBrowser() {
         setError(err.message)
         setLoading(false)
       })
-  }, [account, folder, offset])
+  }, [folder, offset])
 
   const totalPages = Math.ceil(total / limit)
 
@@ -125,7 +127,7 @@ export function EmailBrowser() {
     'nav:up': () => setSelectedIndex(i => Math.max(i - 1, 0)),
     'nav:open': openSelected,
     'nav:search': () => searchInputRef.current?.focus(),
-    'nav:inbox': () => navigate('/folder/_/Inbox'),
+    'nav:inbox': () => navigate('/folder/Inbox'),
     'nav:nextPage': () => page < totalPages && handlePageChange(page + 1),
     'nav:prevPage': () => page > 1 && handlePageChange(page - 1),
   })
@@ -137,25 +139,14 @@ export function EmailBrowser() {
     }
   }
 
-  // Group folders by account
-  const foldersByAccount: Record<string, FSFolder[]> = {}
-  for (const f of folders) {
-    if (!foldersByAccount[f.account]) {
-      foldersByAccount[f.account] = []
-    }
-    foldersByAccount[f.account].push(f)
-  }
+  // Group folders (for single-account mode, group under one key)
+  // Since we use FS-based layout, just flatten to a list
+  const folderList = folders
 
   return (
     <div className="email-browser">
       <nav className="breadcrumb">
-        <Link to="/">Inbox</Link>
-        {account && folder && account !== 'y' && (
-          <>
-            <span>/</span>
-            <span>{account}</span>
-          </>
-        )}
+        <Link to="/folder/Inbox">Inbox</Link>
         {folder && folder !== 'Inbox' && (
           <>
             <span>/</span>
@@ -177,7 +168,7 @@ export function EmailBrowser() {
           />
           <button type="submit" className="search-button">Search</button>
         </form>
-        {account && folder && (
+        {folder && (
           <p className="folder-info">
             <span className="folder-name">{folder}</span>
             {total > 0 && <span className="count">{total.toLocaleString()} threads</span>}
@@ -188,38 +179,41 @@ export function EmailBrowser() {
       <div className="browser-layout">
         <aside className="folder-sidebar">
           <h3>Folders</h3>
-          {Object.entries(foldersByAccount).map(([acct, fldrs]) => (
-            <div key={acct} className="folder-group">
-              <h4>{acct}</h4>
-              <ul>
-                {fldrs.map(f => {
-                  const isActive = f.account === account && f.folder === folder
-                  return (
-                    <li key={`${f.account}-${f.folder}`}>
-                      <Link
-                        to={`/folder/${encodeURIComponent(f.account)}/${f.folder}`}
-                        className={isActive ? 'active' : ''}
-                      >
-                        {f.folder}
-                        <span className="count">{f.eml_count.toLocaleString()}</span>
-                      </Link>
-                    </li>
-                  )
-                })}
-              </ul>
-            </div>
-          ))}
+          <ul>
+            {folderList.map(f => {
+              const isActive = f.folder === folder
+              return (
+                <li key={f.folder}>
+                  <Link
+                    to={`/folder/${f.folder}`}
+                    className={isActive ? 'active' : ''}
+                  >
+                    {f.folder}
+                    <span className="count">{f.eml_count.toLocaleString()}</span>
+                  </Link>
+                </li>
+              )
+            })}
+          </ul>
         </aside>
 
         <main className="email-list">
-          {!account || !folder ? (
+          {!folder ? (
             <div className="placeholder">
               <p>Select a folder from the sidebar to browse emails</p>
             </div>
           ) : loading ? (
             <div className="loading">Loading...</div>
           ) : error ? (
-            <div className="error">{error}</div>
+            <div className="error">
+              <h3>Error loading folder</h3>
+              <p>{error}</p>
+              <p className="error-hint">
+                {error.includes('not found') || error.includes('No such')
+                  ? `The folder "${folder}" does not exist on disk. Check that the path exists.`
+                  : 'Try refreshing the page or selecting a different folder.'}
+              </p>
+            </div>
           ) : threads.length === 0 ? (
             <div className="empty">No emails in this folder</div>
           ) : (
