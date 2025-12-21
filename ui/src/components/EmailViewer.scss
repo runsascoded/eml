@@ -23,6 +23,286 @@
     border: 1px solid var(--border-color);
   }
 
+  // Default style thread panel
+  .thread-panel.default-style {
+    background: var(--bg-secondary);
+    border-radius: $radius-lg;
+    padding: $spacing-md;
+    margin-bottom: $spacing-lg;
+    border: 1px solid var(--border-color);
+
+    h3 {
+      margin: 0 0 $spacing-sm 0;
+      color: var(--accent);
+      font-size: 0.95em;
+    }
+
+    .thread-list {
+      display: flex;
+      flex-direction: column;
+      gap: $spacing-xs;
+    }
+
+    .thread-item {
+      padding: $spacing-xs $spacing-sm;
+      border-radius: $radius-sm;
+      font-size: 0.85em;
+      display: flex;
+      gap: $spacing-sm;
+      align-items: baseline;
+
+      &.current {
+        background: var(--bg-tertiary);
+        font-weight: 500;
+      }
+
+      &:not(.current):hover {
+        background: var(--bg-hover);
+      }
+
+      a {
+        display: flex;
+        gap: $spacing-sm;
+        align-items: baseline;
+        color: inherit;
+        text-decoration: none;
+        width: 100%;
+
+        &:hover {
+          color: var(--accent);
+        }
+      }
+
+      .thread-from {
+        color: var(--text-primary);
+        min-width: 150px;
+        flex-shrink: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .thread-date {
+        color: var(--text-muted);
+        font-size: 0.85em;
+        min-width: 160px;
+        flex-shrink: 0;
+      }
+
+      .thread-subject {
+        color: var(--text-secondary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+    }
+  }
+
+  // Superhuman style thread panel
+  .thread-panel.superhuman-style {
+    margin-bottom: $spacing-lg;
+
+    .thread-header {
+      margin-bottom: $spacing-sm;
+
+      .thread-count {
+        font-size: 0.8em;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+    }
+
+    .thread-list {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .thread-item {
+      display: flex;
+      gap: $spacing-sm;
+      padding: $spacing-sm $spacing-md;
+      border-radius: $radius-md;
+      cursor: pointer;
+      transition: background 0.15s ease;
+
+      &:hover:not(.current) {
+        background: var(--bg-secondary);
+      }
+
+      &.current {
+        background: var(--bg-tertiary);
+        border-left: 3px solid var(--accent);
+        padding-left: calc(#{$spacing-md} - 3px);
+      }
+
+      .avatar {
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        background: var(--accent);
+        color: #fff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.75em;
+        font-weight: 600;
+        flex-shrink: 0;
+      }
+
+      .content {
+        flex: 1;
+        min-width: 0;
+
+        a {
+          color: inherit;
+          text-decoration: none;
+          display: block;
+        }
+      }
+
+      .top-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: $spacing-sm;
+      }
+
+      .sender {
+        font-weight: 500;
+        color: var(--text-primary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .date {
+        font-size: 0.8em;
+        color: var(--text-muted);
+        flex-shrink: 0;
+      }
+
+      .snippet {
+        font-size: 0.85em;
+        color: var(--text-secondary);
+        margin-top: 2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+    }
+  }
+
+  // Gmail style thread panel
+  .thread-panel.gmail-style {
+    background: var(--bg-secondary);
+    border-radius: $radius-lg;
+    margin-bottom: $spacing-lg;
+    border: 1px solid var(--border-color);
+    overflow: hidden;
+
+    .thread-subject-header {
+      padding: $spacing-md $spacing-lg;
+      font-size: 1.3em;
+      color: var(--text-primary);
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      align-items: center;
+      gap: $spacing-sm;
+
+      .message-count {
+        font-size: 0.6em;
+        background: var(--bg-tertiary);
+        padding: 2px 8px;
+        border-radius: 12px;
+        color: var(--text-secondary);
+      }
+    }
+
+    .thread-list {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .thread-item {
+      border-bottom: 1px solid var(--border-color);
+
+      &:last-child {
+        border-bottom: none;
+      }
+
+      &.current {
+        background: var(--bg-tertiary);
+      }
+
+      .collapsed-row {
+        display: flex;
+        align-items: center;
+        gap: $spacing-sm;
+        padding: $spacing-sm $spacing-lg;
+        cursor: pointer;
+        transition: background 0.15s ease;
+
+        &:hover {
+          background: var(--bg-hover);
+        }
+      }
+
+      .avatar {
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        background: #1a73e8;
+        color: #fff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.8em;
+        font-weight: 500;
+        flex-shrink: 0;
+      }
+
+      .sender {
+        font-weight: 500;
+        color: var(--text-primary);
+        min-width: 120px;
+        flex-shrink: 0;
+      }
+
+      .snippet {
+        flex: 1;
+        color: var(--text-secondary);
+        font-size: 0.9em;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        margin-left: $spacing-sm;
+      }
+
+      .date {
+        font-size: 0.8em;
+        color: var(--text-muted);
+        flex-shrink: 0;
+        margin-left: auto;
+      }
+
+      &.expanded .expanded-content {
+        padding: $spacing-sm $spacing-lg $spacing-md;
+        padding-left: calc(#{$spacing-lg} + 36px + #{$spacing-sm});
+      }
+
+      .view-link {
+        color: var(--accent);
+        font-size: 0.85em;
+
+        &:hover {
+          text-decoration: underline;
+        }
+      }
+    }
+  }
+
   .header {
     background: var(--bg-secondary);
     border-radius: $radius-lg;

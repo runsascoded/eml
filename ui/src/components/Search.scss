@@ -85,6 +85,32 @@
   font-size: $font-size-sm;
 }
 
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: $spacing-md;
+}
+
+.page-size-select {
+  padding: 4px $spacing-sm;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-sm;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 0.75rem;
+  cursor: pointer;
+
+  &:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+}
+
 .pagination {
   display: flex;
   gap: $spacing-sm;
