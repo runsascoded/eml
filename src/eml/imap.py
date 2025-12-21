@@ -26,6 +26,8 @@ class EmailInfo:
     to_addr: str
     cc_addr: str
     subject: str
+    in_reply_to: str = ""
+    references: str = ""
 
 
 @dataclass
@@ -181,7 +183,7 @@ class IMAPClient:
         # Ensure UID is bytes for imaplib
         uid_bytes = uid if isinstance(uid, bytes) else str(uid).encode()
         typ, data = self.conn.uid(
-            "FETCH", uid_bytes, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID DATE FROM TO CC SUBJECT)])"
+            "FETCH", uid_bytes, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID DATE FROM TO CC SUBJECT IN-REPLY-TO REFERENCES)])"
         )
         if typ != "OK" or not data or not data[0]:
             raise RuntimeError(f"Failed to fetch headers for UID {uid}")
@@ -210,6 +212,8 @@ class IMAPClient:
             to_addr=msg.get("To", ""),
             cc_addr=msg.get("Cc", ""),
             subject=msg.get("Subject", ""),
+            in_reply_to=msg.get("In-Reply-To", ""),
+            references=msg.get("References", ""),
         )
 
     def fetch_message_ids_batch(self, uids: list[bytes | int], batch_size: int = 500) -> dict[int, str]:

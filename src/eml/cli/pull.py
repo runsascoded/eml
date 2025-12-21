@@ -359,6 +359,8 @@ def pull(
                             from_addr=info.from_addr or None,
                             to_addr=info.to_addr or None,
                             body_text=body_text,
+                            in_reply_to=info.in_reply_to or None,
+                            references=info.references or None,
                         )
 
                     # Clear from failures if previously failed

@@ -20,6 +20,7 @@ from .utils import AliasGroup
 from .account import account
 from .attachments import attachments
 from .index_cmds import backfill, fsck, index, index_fts, uids
+from .backfill_threads import backfill_threads
 from .misc import convert, folders, init, ingest, ls, migrate, tags
 from .pull import pull
 from .push import push
@@ -50,6 +51,7 @@ main.add_command(attachments)
 
 # Register individual commands
 main.add_command(backfill)
+main.add_command(backfill_threads)
 main.add_command(convert)
 main.add_command(folders)
 main.add_command(fsck)
@@ -74,6 +76,7 @@ __all__ = [
     'account',
     'attachments',
     'backfill',
+    'backfill_threads',
     'convert',
     'folders',
     'fsck',
