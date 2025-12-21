@@ -11,6 +11,9 @@ The pulls.db file is Git-tracked, enabling:
 - Track server state for set operations (what's on server vs local)
 """
 
+import base64
+import hashlib
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -18,6 +21,54 @@ from pathlib import Path
 
 
 PULLS_DB = "pulls.db"
+
+
+def compute_thread_slug(thread_id: str) -> str:
+    """Compute an 8-char base64url slug from a thread_id.
+
+    Uses first 6 bytes (48 bits) of SHA256 hash, encoded as base64url.
+    This is the "base" slug - collision handling happens at insert time.
+
+    Args:
+        thread_id: The canonical thread_id (Message-ID of thread root)
+
+    Returns:
+        8-character base64url string (no padding)
+    """
+    hash_bytes = hashlib.sha256(thread_id.encode()).digest()[:6]
+    return base64.urlsafe_b64encode(hash_bytes).decode().rstrip('=')
+
+
+def compute_thread_id(
+    message_id: str | None,
+    references: str | None,
+    in_reply_to: str | None,
+) -> str | None:
+    """Compute canonical thread_id from message headers.
+
+    Thread ID is the first message-id in the references chain (the thread root),
+    or the message's own ID if it has no references (it IS the root).
+
+    Args:
+        message_id: This message's Message-ID header
+        references: References header (space-separated message-ids)
+        in_reply_to: In-Reply-To header
+
+    Returns:
+        The thread root message-id, or None if no message_id available
+    """
+    # Extract first message-id from references (the thread root)
+    if references:
+        matches = re.findall(r'<[^>]+>', references)
+        if matches:
+            return matches[0]
+
+    # Fall back to in_reply_to (makes this message part of parent's thread)
+    if in_reply_to:
+        return in_reply_to
+
+    # No threading info - this message IS the thread root
+    return message_id
 
 
 @dataclass
@@ -56,6 +107,8 @@ class PulledMessage:
     # Threading fields
     in_reply_to: str | None = None  # In-Reply-To header
     references: str | None = None  # References header (space-separated message-ids)
+    thread_id: str | None = None  # Canonical thread ID (first in references chain)
+    thread_slug: str | None = None  # 8-char base64url slug for URLs
     # Search fields
     from_addr: str | None = None  # From header
     to_addr: str | None = None  # To header
@@ -242,9 +295,29 @@ class PullsDB:
         # Threading columns
         _add_column_if_missing("pulled_messages", "in_reply_to")
         _add_column_if_missing("pulled_messages", "references_")
+        _add_column_if_missing("pulled_messages", "thread_id")
+        _add_column_if_missing("pulled_messages", "thread_slug")
         # Search columns
         _add_column_if_missing("pulled_messages", "from_addr")
         _add_column_if_missing("pulled_messages", "to_addr")
+
+        # Add thread_id index
+        try:
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_pulled_thread_id
+                ON pulled_messages(thread_id)
+            """)
+        except sqlite3.OperationalError:
+            pass
+
+        # Add thread_slug index (unique per thread)
+        try:
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_pulled_thread_slug
+                ON pulled_messages(thread_slug)
+            """)
+        except sqlite3.OperationalError:
+            pass
 
     def _ensure_fts_table(self) -> None:
         """Ensure FTS5 table exists and is the correct type (regular, not external content).
@@ -353,16 +426,18 @@ class PullsDB:
             body_text: Plain text body (for FTS only, not stored in pulled_messages)
         """
         ts = (pulled_at or datetime.now()).isoformat()
+        thread_id = compute_thread_id(message_id, references, in_reply_to)
+        thread_slug = self._get_or_create_thread_slug(thread_id) if thread_id else None
         self.conn.execute("""
             INSERT OR REPLACE INTO pulled_messages
                 (account, folder, uidvalidity, uid, content_hash, message_id, local_path, pulled_at,
                  subject, msg_date, status, sync_run_id, error_message,
-                 in_reply_to, references_, from_addr, to_addr)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 in_reply_to, references_, thread_id, thread_slug, from_addr, to_addr)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             account, folder, uidvalidity, uid, content_hash,
             message_id, local_path, ts, subject, msg_date, status, sync_run_id, error_message,
-            in_reply_to, references, from_addr, to_addr
+            in_reply_to, references, thread_id, thread_slug, from_addr, to_addr
         ))
 
         # Incremental FTS indexing - add to search index immediately
@@ -1084,13 +1159,69 @@ class PullsDB:
     # Threading methods
     # -------------------------------------------------------------------------
 
-    def get_thread(self, message_id: str, limit: int = 100) -> list[PulledMessage]:
-        """Get all messages in a thread by following In-Reply-To and References.
+    def _get_or_create_thread_slug(self, thread_id: str) -> str:
+        """Get existing thread_slug for a thread_id, or create a new one.
 
-        This finds:
-        - Messages that reply to this message_id (via in_reply_to)
-        - Messages that reference this message_id (via references_)
-        - The original message itself
+        If another message with the same thread_id already has a slug, return that.
+        Otherwise, compute a new slug with collision handling.
+
+        Args:
+            thread_id: The canonical thread_id (Message-ID of thread root)
+
+        Returns:
+            8-character base64url slug
+        """
+        # Check if any message with this thread_id already has a slug
+        cur = self.conn.execute("""
+            SELECT thread_slug FROM pulled_messages
+            WHERE thread_id = ? AND thread_slug IS NOT NULL
+            LIMIT 1
+        """, (thread_id,))
+        row = cur.fetchone()
+        if row and row[0]:
+            return row[0]
+
+        # Compute base slug
+        base_slug = compute_thread_slug(thread_id)
+
+        # Check for collision with different thread_id
+        cur = self.conn.execute("""
+            SELECT thread_id FROM pulled_messages
+            WHERE thread_slug = ? AND thread_id != ?
+            LIMIT 1
+        """, (base_slug, thread_id))
+
+        if not cur.fetchone():
+            # No collision
+            return base_slug
+
+        # Collision - increment until we find a free slug
+        # Decode the slug back to bytes, increment as integer, re-encode
+        slug_bytes = base64.urlsafe_b64decode(base_slug + '==')
+        slug_int = int.from_bytes(slug_bytes, 'big')
+
+        for _ in range(1000):  # Safety limit
+            slug_int += 1
+            new_bytes = slug_int.to_bytes(6, 'big')
+            new_slug = base64.urlsafe_b64encode(new_bytes).decode().rstrip('=')
+
+            cur = self.conn.execute("""
+                SELECT 1 FROM pulled_messages
+                WHERE thread_slug = ? AND thread_id != ?
+                LIMIT 1
+            """, (new_slug, thread_id))
+
+            if not cur.fetchone():
+                return new_slug
+
+        # Fallback: use full hash (should never happen)
+        return hashlib.sha256(thread_id.encode()).hexdigest()[:16]
+
+    def get_thread(self, message_id: str, limit: int = 100) -> list[PulledMessage]:
+        """Get all messages in a thread using thread_id index.
+
+        First computes the thread_id for the given message, then fetches all
+        messages with the same thread_id.
 
         Args:
             message_id: The Message-ID to find thread for
@@ -1099,18 +1230,78 @@ class PullsDB:
         Returns:
             List of PulledMessage objects in the thread, ordered by msg_date
         """
-        # Find messages that reply to this message_id or reference it
+        # First, get the thread_id for this message
+        cur = self.conn.execute("""
+            SELECT thread_id, in_reply_to, references_
+            FROM pulled_messages
+            WHERE message_id = ?
+        """, (message_id,))
+        row = cur.fetchone()
+
+        if not row:
+            return []
+
+        thread_id = row[0]
+
+        # If thread_id is not populated, compute it (for backwards compat with unbackfilled data)
+        if not thread_id:
+            thread_id = compute_thread_id(message_id, row[2], row[1])
+
+        if not thread_id:
+            # No thread info, return just this message
+            cur = self.conn.execute("""
+                SELECT account, folder, uidvalidity, uid, content_hash, message_id,
+                       local_path, pulled_at, status, sync_run_id, subject, msg_date,
+                       error_message, in_reply_to, references_, thread_id, thread_slug, from_addr, to_addr
+                FROM pulled_messages
+                WHERE message_id = ?
+            """, (message_id,))
+            row = cur.fetchone()
+            return [self._row_to_pulled_message(row)] if row else []
+
+        return self.get_thread_by_id(thread_id, limit)
+
+    def get_thread_by_id(self, thread_id: str, limit: int = 100) -> list[PulledMessage]:
+        """Get all messages in a thread by thread_id directly.
+
+        Args:
+            thread_id: The thread_id to look up
+            limit: Max messages to return
+
+        Returns:
+            List of PulledMessage objects in the thread, ordered by msg_date
+        """
         cur = self.conn.execute("""
             SELECT account, folder, uidvalidity, uid, content_hash, message_id,
                    local_path, pulled_at, status, sync_run_id, subject, msg_date,
-                   error_message, in_reply_to, references_, from_addr, to_addr
+                   error_message, in_reply_to, references_, thread_id, thread_slug, from_addr, to_addr
             FROM pulled_messages
-            WHERE message_id = ?
-               OR in_reply_to = ?
-               OR references_ LIKE ?
+            WHERE thread_id = ?
             ORDER BY msg_date
             LIMIT ?
-        """, (message_id, message_id, f'%{message_id}%', limit))
+        """, (thread_id, limit))
+
+        return [self._row_to_pulled_message(row) for row in cur]
+
+    def get_thread_by_slug(self, slug: str, limit: int = 100) -> list[PulledMessage]:
+        """Get all messages in a thread by thread_slug.
+
+        Args:
+            slug: The 8-char base64url thread slug
+            limit: Max messages to return
+
+        Returns:
+            List of PulledMessage objects in the thread, ordered by msg_date
+        """
+        cur = self.conn.execute("""
+            SELECT account, folder, uidvalidity, uid, content_hash, message_id,
+                   local_path, pulled_at, status, sync_run_id, subject, msg_date,
+                   error_message, in_reply_to, references_, thread_id, thread_slug, from_addr, to_addr
+            FROM pulled_messages
+            WHERE thread_slug = ?
+            ORDER BY msg_date
+            LIMIT ?
+        """, (slug, limit))
 
         return [self._row_to_pulled_message(row) for row in cur]
 
@@ -1127,7 +1318,7 @@ class PullsDB:
         cur = self.conn.execute("""
             SELECT account, folder, uidvalidity, uid, content_hash, message_id,
                    local_path, pulled_at, status, sync_run_id, subject, msg_date,
-                   error_message, in_reply_to, references_, from_addr, to_addr
+                   error_message, in_reply_to, references_, thread_id, thread_slug, from_addr, to_addr
             FROM pulled_messages
             WHERE in_reply_to = ?
             ORDER BY msg_date
@@ -1155,6 +1346,8 @@ class PullsDB:
             error_message=row["error_message"] if "error_message" in keys else None,
             in_reply_to=row["in_reply_to"] if "in_reply_to" in keys else None,
             references=row["references_"] if "references_" in keys else None,
+            thread_id=row["thread_id"] if "thread_id" in keys else None,
+            thread_slug=row["thread_slug"] if "thread_slug" in keys else None,
             from_addr=row["from_addr"] if "from_addr" in keys else None,
             to_addr=row["to_addr"] if "to_addr" in keys else None,
         )

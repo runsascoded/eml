@@ -12,12 +12,14 @@ import asyncio
 import email
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 import uvicorn
 
 from .config import get_eml_root
@@ -102,11 +104,11 @@ def api_histogram(account: str | None = None, folder: str | None = None, hours: 
 
 @app.get("/api/recent")
 def api_recent(limit: int = 20, account: str | None = None, folder: str | None = None):
-    """Get recent activity (all pulls, including skipped/deduped)."""
+    """Get recent activity (all pulls, including skipped/deduped and failures)."""
     root = get_root()
     with get_pulls_db(root) as db:
-        # Get recent pulls - both new files and deduped
-        # with_path_only=False includes skipped (deduped) entries
+        # Get recent pulls - new files, deduped, and failures
+        # with_path_only=False includes skipped (deduped) and failed entries
         pulls = db.get_recent_pulls(limit=limit, account=account, folder=folder, with_path_only=False)
         return {
             "pulls": [
@@ -115,7 +117,7 @@ def api_recent(limit: int = 20, account: str | None = None, folder: str | None =
                     "folder": p.folder,
                     "path": p.local_path,
                     "pulled_at": p.pulled_at.isoformat(),
-                    "is_new": p.status != "skipped",  # True if new file, False if deduped
+                    "status": p.status,  # 'new', 'skipped', or 'failed'
                     "subject": p.subject,
                     "msg_date": p.msg_date,
                 }
@@ -155,6 +157,9 @@ def api_email(path: str):
         "cc": msg.get("Cc", ""),
         "date": msg.get("Date", ""),
         "subject": msg.get("Subject", "(no subject)"),
+        "message_id": msg.get("Message-ID", ""),
+        "in_reply_to": msg.get("In-Reply-To", ""),
+        "references": msg.get("References", ""),
     }
 
     # Get body (prefer HTML, fall back to plain)
@@ -184,8 +189,9 @@ def api_email(path: str):
         except Exception:
             body_plain = "(could not decode body)"
 
-    # Get attachments
+    # Get attachments and build cid map for inline images
     attachments = []
+    cid_map: dict[str, str] = {}  # cid -> filename
     if msg.is_multipart():
         for part in msg.walk():
             filename = part.get_filename()
@@ -196,6 +202,34 @@ def api_email(path: str):
                     "content_type": part.get_content_type(),
                     "size": len(payload) if payload else 0,
                 })
+                # Extract Content-ID for cid: URL mapping
+                content_id = part.get("Content-ID", "")
+                if content_id:
+                    # Content-ID is usually <xxx>, strip angle brackets
+                    cid = content_id.strip("<>")
+                    cid_map[cid] = filename
+
+    # Rewrite cid: URLs in HTML to use our attachment API
+    if body_html and cid_map:
+        def replace_cid(match: re.Match) -> str:
+            cid = match.group(1)
+            if cid in cid_map:
+                filename = cid_map[cid]
+                return f"/api/attachment/{path}/{quote(filename)}"
+            return match.group(0)  # Return unchanged if not found
+
+        body_html = re.sub(r'cid:([^"\'>\s]+)', replace_cid, body_html)
+
+        # Wrap images with our attachment URLs in clickable links
+        def wrap_img_in_link(match: re.Match) -> str:
+            img_tag = match.group(0)
+            src = match.group(1)
+            # Only wrap images served from our attachment API
+            if src.startswith('/api/attachment/'):
+                return f'<a href="{src}" target="_blank" rel="noopener noreferrer">{img_tag}</a>'
+            return img_tag
+
+        body_html = re.sub(r'<img[^>]+src="(/api/attachment/[^"]+)"[^>]*>', wrap_img_in_link, body_html)
 
     return {
         "path": path,
@@ -204,6 +238,36 @@ def api_email(path: str):
         "body_plain": body_plain,
         "attachments": attachments,
     }
+
+
+@app.get("/api/attachment/{path:path}/{filename}")
+def api_attachment(path: str, filename: str):
+    """Get an attachment from an email."""
+    root = get_root()
+    eml_path = root / path
+    if not eml_path.exists():
+        return JSONResponse({"error": f"Email not found: {path}"}, status_code=404)
+
+    with open(eml_path, "rb") as f:
+        msg = email.message_from_binary_file(f)
+
+    # Find the attachment
+    if msg.is_multipart():
+        for part in msg.walk():
+            part_filename = part.get_filename()
+            if part_filename == filename:
+                payload = part.get_payload(decode=True)
+                content_type = part.get_content_type()
+                if payload:
+                    return Response(
+                        content=payload,
+                        media_type=content_type,
+                        headers={
+                            "Content-Disposition": f'inline; filename="{filename}"',
+                        },
+                    )
+
+    return JSONResponse({"error": f"Attachment not found: {filename}"}, status_code=404)
 
 
 @app.get("/api/sync-runs")
@@ -412,21 +476,121 @@ def api_thread(message_id: str, limit: int = 100):
     root = get_root()
     with get_pulls_db(root) as db:
         messages = db.get_thread(message_id=message_id, limit=limit)
+        # Get thread_id and thread_slug from first message (they all share the same)
+        thread_id = messages[0].thread_id if messages else None
+        thread_slug = messages[0].thread_slug if messages else None
         return {
             "message_id": message_id,
+            "thread_id": thread_id,
+            "thread_slug": thread_slug,
             "count": len(messages),
             "messages": [
                 {
                     "account": m.account,
                     "folder": m.folder,
                     "uid": m.uid,
+                    "subject": m.subject,
                     "message_id": m.message_id,
+                    "thread_id": m.thread_id,
+                    "thread_slug": m.thread_slug,
                     "local_path": m.local_path,
                     "msg_date": m.msg_date,
                     "in_reply_to": m.in_reply_to,
                     "references": m.references,
                     "from_addr": m.from_addr,
                     "to_addr": m.to_addr,
+                }
+                for m in messages
+            ],
+        }
+
+
+@app.get("/api/thread-by-id/{thread_id:path}")
+def api_thread_by_id(thread_id: str, limit: int = 100):
+    """Get all messages in a thread by thread_id directly.
+
+    This is more efficient than /api/thread which looks up by message_id first.
+    """
+    root = get_root()
+    with get_pulls_db(root) as db:
+        messages = db.get_thread_by_id(thread_id=thread_id, limit=limit)
+        thread_slug = messages[0].thread_slug if messages else None
+        return {
+            "thread_id": thread_id,
+            "thread_slug": thread_slug,
+            "count": len(messages),
+            "messages": [
+                {
+                    "account": m.account,
+                    "folder": m.folder,
+                    "uid": m.uid,
+                    "subject": m.subject,
+                    "message_id": m.message_id,
+                    "thread_id": m.thread_id,
+                    "thread_slug": m.thread_slug,
+                    "local_path": m.local_path,
+                    "msg_date": m.msg_date,
+                    "in_reply_to": m.in_reply_to,
+                    "references": m.references,
+                    "from_addr": m.from_addr,
+                    "to_addr": m.to_addr,
+                }
+                for m in messages
+            ],
+        }
+
+
+def count_attachments(root: Path, local_path: str | None) -> int:
+    """Count attachments in an .eml file."""
+    if not local_path:
+        return 0
+    eml_path = root / local_path
+    if not eml_path.exists():
+        return 0
+    try:
+        with open(eml_path, "rb") as f:
+            msg = email.message_from_binary_file(f)
+        count = 0
+        if msg.is_multipart():
+            for part in msg.walk():
+                if part.get_filename():
+                    count += 1
+        return count
+    except Exception:
+        return 0
+
+
+@app.get("/api/thread-by-slug/{slug}")
+def api_thread_by_slug(slug: str, limit: int = 100):
+    """Get all messages in a thread by thread_slug.
+
+    This is the preferred endpoint for thread URLs.
+    """
+    root = get_root()
+    with get_pulls_db(root) as db:
+        messages = db.get_thread_by_slug(slug=slug, limit=limit)
+        if not messages:
+            return JSONResponse({"error": "Thread not found"}, status_code=404)
+        return {
+            "thread_slug": slug,
+            "thread_id": messages[0].thread_id,
+            "count": len(messages),
+            "messages": [
+                {
+                    "account": m.account,
+                    "folder": m.folder,
+                    "uid": m.uid,
+                    "subject": m.subject,
+                    "message_id": m.message_id,
+                    "thread_id": m.thread_id,
+                    "thread_slug": m.thread_slug,
+                    "local_path": m.local_path,
+                    "msg_date": m.msg_date,
+                    "in_reply_to": m.in_reply_to,
+                    "references": m.references,
+                    "from_addr": m.from_addr,
+                    "to_addr": m.to_addr,
+                    "attachment_count": count_attachments(root, m.local_path),
                 }
                 for m in messages
             ],

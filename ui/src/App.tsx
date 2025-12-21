@@ -6,6 +6,7 @@ import { EmailViewer } from './components/EmailViewer'
 import { EmailBrowser } from './components/EmailBrowser'
 import { SyncRunDetail } from './components/SyncRunDetail'
 import { FolderDetail } from './components/FolderDetail'
+import { ThreadViewer } from './components/ThreadViewer'
 import './styles/main.scss'
 
 function App() {
@@ -18,6 +19,7 @@ function App() {
           <Route path="/browse/:account/:folder" element={<EmailBrowser />} />
           <Route path="/folder/:account/:folder" element={<FolderDetail />} />
           <Route path="/email/*" element={<EmailViewer />} />
+          <Route path="/thread/*" element={<ThreadViewer />} />
           <Route path="/sync/:runId" element={<SyncRunDetail />} />
         </Routes>
         <ThemeToggle />

@@ -9,7 +9,7 @@ export interface PullActivity {
   folder: string
   path: string | null
   pulled_at: string
-  is_new: boolean
+  status: 'new' | 'skipped' | 'failed' | null
   subject: string | null
   msg_date: string | null
 }
@@ -149,8 +149,34 @@ export interface EmailData {
     cc: string
     date: string
     subject: string
+    message_id: string
+    in_reply_to: string
+    references: string
   }
   body_html: string
   body_plain: string
   attachments: EmailAttachment[]
+}
+
+export interface ThreadMessage {
+  uid: number
+  subject: string | null
+  message_id: string | null
+  thread_id: string | null
+  thread_slug: string | null
+  local_path: string | null
+  msg_date: string | null
+  in_reply_to: string | null
+  references: string | null
+  from_addr: string | null
+  to_addr: string | null
+  attachment_count?: number
+}
+
+export interface ThreadResponse {
+  message_id?: string
+  thread_id: string | null
+  thread_slug: string | null
+  count: number
+  messages: ThreadMessage[]
 }
