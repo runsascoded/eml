@@ -12,7 +12,7 @@ import type { UIDStatus, PullActivity, SyncStatus } from '../types'
 
 export function Dashboard() {
   const [account, setAccount] = useState('y')
-  const [folder, setFolder] = useState('Inbox')
+  const [folder, setFolder] = useState<string | null>(null)  // null = All folders
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null)
 
   const { folders } = useFolders()
@@ -22,13 +22,14 @@ export function Dashboard() {
   const { sync, refresh: refreshSync } = useSyncStatus()
   const { runs } = useSyncRuns(5)
 
-  const handleFolderSelect = useCallback((acc: string, fld: string) => {
+  const handleFolderSelect = useCallback((acc: string, fld: string | null) => {
     setAccount(acc)
     setFolder(fld)
   }, [])
 
   const handleStatusUpdate = useCallback((s: UIDStatus) => {
-    if (s.account === account && s.folder === folder) {
+    // Refresh if viewing all folders or if matching specific folder
+    if (s.account === account && (folder === null || s.folder === folder)) {
       refreshStatus()
       setLastUpdate(new Date())
     }
@@ -58,7 +59,7 @@ export function Dashboard() {
         currentAccount={account}
         currentFolder={folder}
         onSelect={handleFolderSelect}
-        linkMode
+        showAll
       />
       <SyncStatusBar sync={sync} />
       <div className="card">
@@ -67,7 +68,7 @@ export function Dashboard() {
       </div>
       <div className="grid">
         <div className="card">
-          <h2>Recent Sync Runs</h2>
+          <h2>Recent Sync Runs <Link to="/admin/syncs" className="view-all-link">View all</Link></h2>
           <SyncRunsList runs={runs} compact />
         </div>
         <div className="card">

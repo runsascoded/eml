@@ -26,6 +26,10 @@
     &.deduped {
       background: var(--accent-secondary);
     }
+
+    &.failed {
+      background: var(--error);
+    }
   }
 }
 
@@ -66,10 +70,25 @@
 
 .bar-new {
   background: var(--accent);
-  border-radius: 2px 0 0 2px;
 }
 
 .bar-deduped {
   background: var(--accent-secondary);
+}
+
+.bar-failed {
+  background: var(--error);
+}
+
+// Apply rounded corners to first and last visible bars
+.bar:first-child {
+  border-radius: 2px 0 0 2px;
+}
+
+.bar:last-child {
   border-radius: 0 2px 2px 0;
+}
+
+.bar:only-child {
+  border-radius: 2px;
 }

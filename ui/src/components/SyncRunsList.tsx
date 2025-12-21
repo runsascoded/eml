@@ -55,7 +55,7 @@ export function SyncRunsList({ runs, compact = false }: Props) {
       {runs.map((run) => {
         const stale = isStaleRunning(run)
         return (
-          <Link key={run.id} to={`/sync/${run.id}`} className="sync-run-item">
+          <Link key={run.id} to={`/admin/sync/${run.id}`} className="sync-run-item">
             <div className="run-header">
               <span className="operation">{run.operation}</span>
               <code className="folder">{run.account}/{run.folder}</code>

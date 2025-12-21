@@ -1,0 +1,73 @@
+@use '../styles/variables' as *;
+
+.sync-runs-page {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: $spacing-lg;
+
+  .header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: $spacing-lg;
+
+    h1 {
+      margin: 0;
+    }
+
+    .back-link {
+      color: var(--accent);
+      text-decoration: none;
+
+      &:hover {
+        text-decoration: underline;
+      }
+    }
+  }
+
+  .pagination-info {
+    font-size: $font-size-sm;
+    color: var(--text-secondary);
+    margin-bottom: $spacing-md;
+
+    .loading {
+      color: var(--accent);
+    }
+  }
+
+  .pagination {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: $spacing-sm;
+    margin-top: $spacing-lg;
+    padding-top: $spacing-lg;
+    border-top: 1px solid var(--border);
+  }
+
+  .pagination-btn {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: $spacing-xs $spacing-sm;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: $font-size-sm;
+
+    &:hover:not(:disabled) {
+      background: var(--surface-hover);
+    }
+
+    &:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+  }
+
+  .page-info {
+    font-size: $font-size-sm;
+    color: var(--text-secondary);
+    min-width: 100px;
+    text-align: center;
+  }
+}

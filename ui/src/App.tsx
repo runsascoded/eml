@@ -5,6 +5,7 @@ import { Dashboard } from './components/Dashboard'
 import { EmailViewer } from './components/EmailViewer'
 import { EmailBrowser } from './components/EmailBrowser'
 import { SyncRunDetail } from './components/SyncRunDetail'
+import { SyncRunsPage } from './components/SyncRunsPage'
 import { FolderDetail } from './components/FolderDetail'
 import { ThreadViewer } from './components/ThreadViewer'
 import './styles/main.scss'
@@ -21,6 +22,7 @@ function App() {
           <Route path="/thread/*" element={<ThreadViewer />} />
           {/* Admin/sync routes */}
           <Route path="/admin" element={<Dashboard />} />
+          <Route path="/admin/syncs" element={<SyncRunsPage />} />
           <Route path="/admin/folder/:account/:folder" element={<FolderDetail />} />
           <Route path="/admin/sync/:runId" element={<SyncRunDetail />} />
         </Routes>

@@ -11,7 +11,8 @@ export function Histogram({ data }: Props) {
     return <div className="histogram">Loading...</div>
   }
 
-  const maxCount = Math.max(...data.data.map((d) => d.new + d.deduped), 1)
+  const maxCount = Math.max(...data.data.map((d) => d.new + d.deduped + (d.failed || 0)), 1)
+  const hasFailures = data.data.some((d) => (d.failed || 0) > 0)
 
   return (
     <div className="histogram">
@@ -24,13 +25,25 @@ export function Histogram({ data }: Props) {
           <div className="legend-color deduped" />
           Deduped
         </div>
+        {hasFailures && (
+          <div className="legend-item">
+            <div className="legend-color failed" />
+            Failed
+          </div>
+        )}
       </div>
       <div className="bar-chart">
         {data.data.map((d) => {
-          const total = d.new + d.deduped
+          const failed = d.failed || 0
+          const total = d.new + d.deduped + failed
           const newPct = (d.new / maxCount) * 100
           const dedupedPct = (d.deduped / maxCount) * 100
-          const tooltipText = `${d.new.toLocaleString()} new, ${d.deduped.toLocaleString()} deduped`
+          const failedPct = (failed / maxCount) * 100
+          const tooltipParts = [`${d.new.toLocaleString()} new`, `${d.deduped.toLocaleString()} deduped`]
+          if (failed > 0) {
+            tooltipParts.push(`${failed.toLocaleString()} failed`)
+          }
+          const tooltipText = tooltipParts.join(', ')
           return (
             <div key={d.hour} className="bar-row">
               <span className="bar-label">{d.hour}</span>
@@ -47,6 +60,12 @@ export function Histogram({ data }: Props) {
                     <div
                       className="bar bar-deduped"
                       style={{ width: `${dedupedPct}%` }}
+                    />
+                  )}
+                  {failed > 0 && (
+                    <div
+                      className="bar bar-failed"
+                      style={{ width: `${failedPct}%` }}
                     />
                   )}
                 </div>

@@ -19,11 +19,14 @@ export function useFolders() {
   return { folders, refresh }
 }
 
-export function useStatus(account: string, folder: string) {
+export function useStatus(account: string, folder: string | null) {
   const [status, setStatus] = useState<UIDStatus | null>(null)
 
   const refresh = useCallback(async () => {
-    const res = await fetch(`/api/status?account=${account}&folder=${folder}`)
+    const params = new URLSearchParams()
+    params.set('account', account)
+    if (folder) params.set('folder', folder)
+    const res = await fetch(`/api/status?${params}`)
     const data = await res.json()
     setStatus(data)
   }, [account, folder])
@@ -35,11 +38,14 @@ export function useStatus(account: string, folder: string) {
   return { status, refresh }
 }
 
-export function useRecent(account: string, folder: string) {
+export function useRecent(account: string, folder: string | null) {
   const [pulls, setPulls] = useState<PullActivity[]>([])
 
   const refresh = useCallback(async () => {
-    const res = await fetch(`/api/recent?account=${account}&folder=${folder}`)
+    const params = new URLSearchParams()
+    params.set('account', account)
+    if (folder) params.set('folder', folder)
+    const res = await fetch(`/api/recent?${params}`)
     const data = await res.json()
     setPulls(data.pulls || [])
   }, [account, folder])
@@ -51,11 +57,14 @@ export function useRecent(account: string, folder: string) {
   return { pulls, refresh }
 }
 
-export function useHistogram(account: string, folder: string) {
+export function useHistogram(account: string, folder: string | null) {
   const [data, setData] = useState<HistogramData | null>(null)
 
   const refresh = useCallback(async () => {
-    const res = await fetch(`/api/histogram?account=${account}&folder=${folder}`)
+    const params = new URLSearchParams()
+    params.set('account', account)
+    if (folder) params.set('folder', folder)
+    const res = await fetch(`/api/histogram?${params}`)
     const d = await res.json()
     setData(d)
   }, [account, folder])
@@ -131,6 +140,27 @@ export function useSyncRuns(limit = 10) {
   }, [refresh])
 
   return { runs, refresh }
+}
+
+export function useSyncRunsPaginated(limit = 20, offset = 0) {
+  const [runs, setRuns] = useState<SyncRun[]>([])
+  const [total, setTotal] = useState(0)
+  const [loading, setLoading] = useState(false)
+
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    const res = await fetch(`/api/sync-runs?limit=${limit}&offset=${offset}`)
+    const data = await res.json()
+    setRuns(data.runs || [])
+    setTotal(data.total || 0)
+    setLoading(false)
+  }, [limit, offset])
+
+  useEffect(() => {
+    refresh()
+  }, [refresh])
+
+  return { runs, total, loading, refresh }
 }
 
 export function useSyncRunDetail(runId: number | null) {

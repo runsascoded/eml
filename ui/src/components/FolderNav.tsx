@@ -5,18 +5,33 @@ import './FolderNav.scss'
 interface Props {
   folders: Folder[]
   currentAccount: string
-  currentFolder: string
-  onSelect?: (account: string, folder: string) => void
+  currentFolder: string | null  // null means "All"
+  onSelect?: (account: string, folder: string | null) => void
   linkMode?: boolean
+  showAll?: boolean  // Show "All" option
 }
 
-export function FolderNav({ folders, currentAccount, currentFolder, onSelect, linkMode = false }: Props) {
+export function FolderNav({ folders, currentAccount, currentFolder, onSelect, linkMode = false, showAll = false }: Props) {
   if (folders.length === 0) {
     return <div className="folder-nav"><span className="no-folders">No folders found</span></div>
   }
 
+  // Calculate total count across all folders for the account
+  const totalCount = folders
+    .filter(f => f.account === currentAccount)
+    .reduce((sum, f) => sum + f.count, 0)
+
   return (
     <div className="folder-nav">
+      {showAll && (
+        <button
+          className={`folder-btn ${currentFolder === null ? 'active' : ''}`}
+          onClick={() => onSelect?.(currentAccount, null)}
+        >
+          All
+          <span className="folder-count">{totalCount.toLocaleString()}</span>
+        </button>
+      )}
       {folders.map((f) => {
         const isActive = f.folder === currentFolder && f.account === currentAccount
         if (linkMode) {
