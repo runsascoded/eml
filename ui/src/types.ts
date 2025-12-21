@@ -135,6 +135,28 @@ export interface FSEmailsResponse {
   emails: FSEmail[]
 }
 
+export interface FSThread {
+  path: string
+  subject: string
+  from: string
+  to: string
+  date: string
+  size: number
+  thread_id: string | null
+  thread_slug: string | null
+  msg_count: number
+  participants: string
+}
+
+export interface FSThreadsResponse {
+  account: string
+  folder: string
+  total: number
+  offset: number
+  limit: number
+  threads: FSThread[]
+}
+
 export interface EmailAttachment {
   filename: string
   content_type: string

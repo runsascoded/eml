@@ -19,10 +19,9 @@ from .utils import AliasGroup
 # Import command groups and commands
 from .account import account
 from .attachments import attachments
-from .index_cmds import backfill, fsck, index, index_fts, uids
-from .backfill_threads import backfill_threads
-from .migrate_db import rebuild_index, split_db
-from .misc import convert, folders, init, ingest, ls, migrate, tags
+from .index_cmds import fsck, index, index_fts, uids
+from .migrate_db import rebuild_index
+from .misc import convert, folders, init, ingest, ls, tags
 from .parquet_cmds import export_uids, import_uids, uids_stats
 from .pull import pull
 from .push import push
@@ -52,8 +51,6 @@ main.add_command(account)
 main.add_command(attachments)
 
 # Register individual commands
-main.add_command(backfill)
-main.add_command(backfill_threads)
 main.add_command(convert)
 main.add_command(folders)
 main.add_command(fsck)
@@ -62,7 +59,6 @@ main.add_command(index_fts)
 main.add_command(ingest)
 main.add_command(init)
 main.add_command(ls)
-main.add_command(migrate)
 main.add_command(pull)
 main.add_command(push)
 main.add_command(stats)
@@ -70,7 +66,6 @@ main.add_command(status)
 main.add_command(tags)
 main.add_command(uids)
 main.add_command(web)
-main.add_command(split_db)
 main.add_command(rebuild_index)
 main.add_command(export_uids)
 main.add_command(import_uids)
@@ -82,8 +77,6 @@ __all__ = [
     'main',
     'account',
     'attachments',
-    'backfill',
-    'backfill_threads',
     'convert',
     'export_uids',
     'folders',
@@ -93,11 +86,9 @@ __all__ = [
     'ingest',
     'init',
     'ls',
-    'migrate',
     'pull',
     'push',
     'rebuild_index',
-    'split_db',
     'stats',
     'status',
     'tags',

@@ -1,3 +1,4 @@
 packages:
   - .
   - ../../../js/use-url-params
+  - ../../js/use-url-params

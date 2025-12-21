@@ -25,7 +25,7 @@ importers:
         version: 0.2.0(react@19.2.3)
       '@rdub/use-url-params':
         specifier: workspace:*
-        version: link:../../../js/use-url-params
+        version: link:../../js/use-url-params
       '@tanstack/react-query':
         specifier: ^5.90.12
         version: 5.90.12(react@19.2.3)
@@ -82,7 +82,7 @@ importers:
         specifier: ^7.2.4
         version: 7.3.0(@types/node@24.10.4)(sass@1.97.0)
 
-  ../../../js/use-url-params:
+  ../../js/use-url-params:
     devDependencies:
       '@types/react':
         specifier: ^18.3.18

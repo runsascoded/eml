@@ -886,6 +886,113 @@ def api_fs_emails(
     }
 
 
+@app.get("/api/fs-threads/{account}/{folder:path}")
+def api_fs_threads(
+    account: str,
+    folder: str,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """List threads (conversations) in a folder from index.db.
+
+    Returns threads grouped by thread_id, showing only the latest message
+    from each thread with a count of messages in that thread.
+
+    Args:
+        account: Account name (e.g., "y" or "_" for single-account repos)
+        folder: Folder path (e.g., "Inbox")
+        limit: Max threads to return
+        offset: Offset for pagination
+    """
+    root = get_root()
+    index_db = root / ".eml" / "index.db"
+
+    if not index_db.exists():
+        return JSONResponse(
+            {"error": "index.db not found. Run 'eml rebuild-index' first."},
+            status_code=404
+        )
+
+    # Build folder path pattern for SQL LIKE
+    if account == "_":
+        folder_pattern = f"{folder}/%"
+    else:
+        folder_pattern = f"{account}/{folder}/%"
+
+    conn = sqlite3.connect(index_db)
+    conn.row_factory = sqlite3.Row
+
+    # Get total thread count
+    count_sql = """
+        SELECT COUNT(DISTINCT COALESCE(thread_id, path)) as cnt
+        FROM files
+        WHERE path LIKE ?
+    """
+    total = conn.execute(count_sql, (folder_pattern,)).fetchone()["cnt"]
+
+    # Get threads: latest message per thread_id, ordered by max date
+    # For messages without thread_id, treat each as its own thread
+    threads_sql = """
+        WITH thread_stats AS (
+            SELECT
+                COALESCE(thread_id, path) as tid,
+                COUNT(*) as msg_count,
+                MAX(date) as latest_date,
+                GROUP_CONCAT(DISTINCT from_addr) as participants
+            FROM files
+            WHERE path LIKE ?
+            GROUP BY COALESCE(thread_id, path)
+        ),
+        latest_messages AS (
+            SELECT
+                f.*,
+                ts.msg_count,
+                ts.participants,
+                ROW_NUMBER() OVER (
+                    PARTITION BY COALESCE(f.thread_id, f.path)
+                    ORDER BY f.date DESC
+                ) as rn
+            FROM files f
+            JOIN thread_stats ts ON COALESCE(f.thread_id, f.path) = ts.tid
+            WHERE f.path LIKE ?
+        )
+        SELECT
+            path, subject, from_addr, to_addr, date, size,
+            thread_id, thread_slug, msg_count, participants
+        FROM latest_messages
+        WHERE rn = 1
+        ORDER BY date DESC
+        LIMIT ? OFFSET ?
+    """
+
+    rows = conn.execute(threads_sql, (folder_pattern, folder_pattern, limit, offset)).fetchall()
+    conn.close()
+
+    threads = []
+    for row in rows:
+        threads.append({
+            "path": row["path"],
+            "subject": row["subject"] or "(no subject)",
+            "from": row["from_addr"] or "",
+            "to": row["to_addr"] or "",
+            "date": row["date"] or "",
+            "size": row["size"] or 0,
+            "thread_id": row["thread_id"],
+            "thread_slug": row["thread_slug"],
+            "msg_count": row["msg_count"],
+            "participants": row["participants"] or "",
+        })
+
+    return {
+        "account": account,
+        "folder": folder,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "threads": threads,
+    }
+
+
 @app.get("/api/sync-status")
 def api_sync_status():
     """Get current sync operation status from SQLite."""

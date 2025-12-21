@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, Link, useSearchParams, useNavigate } from 'react-router-dom'
 import { useHotkeys, ShortcutsModal } from '@rdub/use-hotkeys'
-import type { FSFolder, FSEmail } from '../types'
+import type { FSFolder, FSThread } from '../types'
 import './EmailBrowser.scss'
 
 function formatSize(bytes: number): string {
@@ -32,9 +32,9 @@ const HOTKEYS = {
 }
 
 const HOTKEY_DESCRIPTIONS = {
-  'nav:down': 'Next email',
-  'nav:up': 'Previous email',
-  'nav:open': 'Open email',
+  'nav:down': 'Next thread',
+  'nav:up': 'Previous thread',
+  'nav:open': 'Open thread',
   'nav:search': 'Focus search',
   'nav:inbox': 'Go to Inbox',
   'nav:nextPage': 'Next page',
@@ -47,7 +47,7 @@ export function EmailBrowser() {
   const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
   const [folders, setFolders] = useState<FSFolder[]>([])
-  const [emails, setEmails] = useState<FSEmail[]>([])
+  const [threads, setThreads] = useState<FSThread[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -67,10 +67,10 @@ export function EmailBrowser() {
       .catch(err => console.error('Failed to load folders:', err))
   }, [])
 
-  // Fetch emails when account/folder changes
+  // Fetch threads when account/folder changes
   useEffect(() => {
     if (!account || !folder) {
-      setEmails([])
+      setThreads([])
       setTotal(0)
       return
     }
@@ -78,15 +78,15 @@ export function EmailBrowser() {
     setLoading(true)
     setError(null)
 
-    fetch(`/api/fs-emails/${encodeURIComponent(account)}/${folder}?limit=${limit}&offset=${offset}`)
+    fetch(`/api/fs-threads/${encodeURIComponent(account)}/${folder}?limit=${limit}&offset=${offset}`)
       .then(res => res.json())
       .then(data => {
         if (data.error) {
           setError(data.error)
-          setEmails([])
+          setThreads([])
           setTotal(0)
         } else {
-          setEmails(data.emails || [])
+          setThreads(data.threads || [])
           setTotal(data.total || 0)
         }
         setLoading(false)
@@ -103,24 +103,29 @@ export function EmailBrowser() {
     setSearchParams({ page: String(newPage) })
   }
 
-  // Reset selection when emails change
+  // Reset selection when threads change
   useEffect(() => {
     setSelectedIndex(0)
-  }, [emails])
+  }, [threads])
 
   // Hotkey handlers
   const openSelected = useCallback(() => {
-    if (emails.length > 0 && selectedIndex < emails.length) {
-      navigate(`/email/${emails[selectedIndex].path}`)
+    if (threads.length > 0 && selectedIndex < threads.length) {
+      const thread = threads[selectedIndex]
+      if (thread.thread_id) {
+        navigate(`/thread/${thread.thread_id}`)
+      } else {
+        navigate(`/email/${thread.path}`)
+      }
     }
-  }, [emails, selectedIndex, navigate])
+  }, [threads, selectedIndex, navigate])
 
   useHotkeys(HOTKEYS, {
-    'nav:down': () => setSelectedIndex(i => Math.min(i + 1, emails.length - 1)),
+    'nav:down': () => setSelectedIndex(i => Math.min(i + 1, threads.length - 1)),
     'nav:up': () => setSelectedIndex(i => Math.max(i - 1, 0)),
     'nav:open': openSelected,
     'nav:search': () => searchInputRef.current?.focus(),
-    'nav:inbox': () => navigate('/folder/y/Inbox'),
+    'nav:inbox': () => navigate('/folder/_/Inbox'),
     'nav:nextPage': () => page < totalPages && handlePageChange(page + 1),
     'nav:prevPage': () => page > 1 && handlePageChange(page - 1),
   })
@@ -175,7 +180,7 @@ export function EmailBrowser() {
         {account && folder && (
           <p className="folder-info">
             <span className="folder-name">{folder}</span>
-            {total > 0 && <span className="count">{total.toLocaleString()} emails</span>}
+            {total > 0 && <span className="count">{total.toLocaleString()} threads</span>}
           </p>
         )}
       </header>
@@ -215,7 +220,7 @@ export function EmailBrowser() {
             <div className="loading">Loading...</div>
           ) : error ? (
             <div className="error">{error}</div>
-          ) : emails.length === 0 ? (
+          ) : threads.length === 0 ? (
             <div className="empty">No emails in this folder</div>
           ) : (
             <>
@@ -229,21 +234,31 @@ export function EmailBrowser() {
                   </tr>
                 </thead>
                 <tbody>
-                  {emails.map((email, index) => (
-                    <tr
-                      key={email.path}
-                      className={index === selectedIndex ? 'selected' : ''}
-                      onClick={() => setSelectedIndex(index)}
-                      onDoubleClick={() => navigate(`/email/${email.path}`)}
-                    >
-                      <td className="subject">
-                        <Link to={`/email/${email.path}`}>{email.subject || '(no subject)'}</Link>
-                      </td>
-                      <td className="from">{email.from}</td>
-                      <td className="date">{formatDate(email.date)}</td>
-                      <td className="size">{formatSize(email.size)}</td>
-                    </tr>
-                  ))}
+                  {threads.map((thread, index) => {
+                    const threadUrl = thread.thread_id
+                      ? `/thread/${thread.thread_id}`
+                      : `/email/${thread.path}`
+                    return (
+                      <tr
+                        key={thread.path}
+                        className={index === selectedIndex ? 'selected' : ''}
+                        onClick={() => setSelectedIndex(index)}
+                        onDoubleClick={() => navigate(threadUrl)}
+                      >
+                        <td className="subject">
+                          <Link to={threadUrl}>
+                            {thread.subject || '(no subject)'}
+                            {thread.msg_count > 1 && (
+                              <span className="thread-count">{thread.msg_count}</span>
+                            )}
+                          </Link>
+                        </td>
+                        <td className="from">{thread.from}</td>
+                        <td className="date">{formatDate(thread.date)}</td>
+                        <td className="size">{formatSize(thread.size)}</td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
 
