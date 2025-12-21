@@ -334,12 +334,36 @@
     border-radius: $radius-lg;
     padding: $spacing-lg;
     min-height: 200px;
+    border: 1px solid var(--border-color);
 
+    // Plain text emails
     pre {
       white-space: pre-wrap;
       word-wrap: break-word;
       font-family: inherit;
       margin: 0;
+    }
+
+    // Ensure images don't overflow
+    img {
+      max-width: 100%;
+      height: auto;
+    }
+
+    // Force all text elements to use theme colors (overrides inline styles)
+    // This ensures readability in dark mode even when emails have dark text
+    &, * {
+      color: var(--email-body-text) !important;
+    }
+
+    // Preserve link colors
+    a, a * {
+      color: var(--accent) !important;
+    }
+
+    // Reset backgrounds that might be set inline
+    table, tr, td, th, div, span, p {
+      background-color: transparent !important;
     }
   }
 

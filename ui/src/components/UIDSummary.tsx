@@ -17,19 +17,8 @@ export function UIDSummary({ status }: Props) {
   return (
     <div className="uid-summary">
       <div>
-        <span className="stat">{status.server_uids.toLocaleString()}</span>{' '}
-        <span className="stat-label">server UIDs</span>
-      </div>
-      <div>
         <span className="stat">{status.pulled_uids.toLocaleString()}</span>{' '}
-        <span className="stat-label">pulled</span>
-      </div>
-      <div>
-        <span className="stat warning">{status.unpulled_uids.toLocaleString()}</span>{' '}
-        <span className="stat-label">unpulled</span>
-      </div>
-      <div className="no-mid">
-        {status.no_message_id.toLocaleString()} without Message-ID
+        <span className="stat-label">messages pulled</span>
       </div>
     </div>
   )

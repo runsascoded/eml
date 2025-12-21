@@ -48,6 +48,12 @@ function EmailBodyWithQuotes({ html, plain }: { html?: string; plain?: string })
       /(<div class="gmail_quote">[\s\S]*$)/i,
       /(<blockquote[\s\S]*$)/i,
       /(<div[^>]*>On [^<]*wrote:[\s\S]*$)/i,
+      // Outlook-style: <hr> followed by From:/Sent:/To: headers
+      /(<hr[^>]*>\s*(?:<[^>]+>\s*)*(?:<b>)?From:[\s\S]*$)/i,
+      // Plain text "From:" after horizontal rule
+      /(_{3,}[\s\S]*?From:[\s\S]*$)/i,
+      // "----- Original Message -----" style
+      /(-{3,}\s*Original Message\s*-{3,}[\s\S]*$)/i,
     ]
 
     let mainContent = html

@@ -58,8 +58,9 @@
   --badge-skip-bg: #444444;
   --badge-skip-text: #cccccc;
   --progress-bar-bg: #444444;
-  --email-body-bg: #f6f8fa;
-  --email-body-text: #1f2328;
+  // Dark mode: dark background with light text for emails
+  --email-body-bg: var(--bg-tertiary);
+  --email-body-text: var(--text-primary);
 
   --shadow: rgba(0, 0, 0, 0.4);
 
