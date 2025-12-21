@@ -1,6 +1,7 @@
 """Persistent index for .eml files."""
 
 import email
+import email.header
 import email.utils
 import sqlite3
 import subprocess
@@ -497,6 +498,25 @@ class FileIndex:
 
         return added, modified, deleted
 
+    def _decode_header(self, value: str | None) -> str:
+        """Decode MIME-encoded header value (e.g., =?UTF-8?Q?...?=)."""
+        if not value:
+            return ""
+        # Convert Header objects to string first
+        if hasattr(value, '__class__') and value.__class__.__name__ == 'Header':
+            value = str(value)
+        try:
+            decoded_parts = email.header.decode_header(value)
+            result = ""
+            for part, charset in decoded_parts:
+                if isinstance(part, bytes):
+                    result += part.decode(charset or 'utf-8', errors='replace')
+                else:
+                    result += part
+            return result
+        except Exception:
+            return str(value)
+
     def _index_file(self, path: Path) -> bool:
         """Index a single .eml file. Returns True if indexed."""
         try:
@@ -523,9 +543,15 @@ class FileIndex:
         in_reply_to = msg.get("In-Reply-To", "").strip() or None
         references = msg.get("References", "").strip() or None
 
+        # Decode MIME-encoded headers
+        subject = self._decode_header(msg.get("Subject", ""))
+        from_addr = self._decode_header(msg.get("From", ""))
+        to_addr = self._decode_header(msg.get("To", ""))
+        cc_addr = self._decode_header(msg.get("Cc", ""))
+
         # Compute thread_id from references chain or message_id
         thread_id = self._compute_thread_id(message_id, in_reply_to, references)
-        thread_slug = self._compute_thread_slug(msg.get("Subject", ""), thread_id)
+        thread_slug = self._compute_thread_slug(subject, thread_id)
 
         # Extract body text for FTS
         body_text = self._extract_body_text(msg)
@@ -535,10 +561,10 @@ class FileIndex:
             content_hash=sha,
             message_id=message_id,
             date=date,
-            from_addr=msg.get("From", ""),
-            to_addr=msg.get("To", ""),
-            cc_addr=msg.get("Cc", ""),
-            subject=msg.get("Subject", ""),
+            from_addr=from_addr,
+            to_addr=to_addr,
+            cc_addr=cc_addr,
+            subject=subject,
             in_reply_to=in_reply_to,
             references=references,
             thread_id=thread_id,
