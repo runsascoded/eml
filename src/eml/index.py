@@ -25,7 +25,13 @@ class IndexedFile:
     date: datetime | None
     from_addr: str
     to_addr: str
+    cc_addr: str
     subject: str
+    in_reply_to: str | None
+    references: str | None
+    thread_id: str | None
+    thread_slug: str | None
+    body_text: str | None
     size: int
     mtime: float
     indexed_at: datetime
@@ -95,7 +101,13 @@ class FileIndex:
                 date TEXT,
                 from_addr TEXT,
                 to_addr TEXT,
+                cc_addr TEXT,
                 subject TEXT,
+                in_reply_to TEXT,
+                references_ TEXT,
+                thread_id TEXT,
+                thread_slug TEXT,
+                body_text TEXT,
                 size INTEGER,
                 mtime REAL,
                 indexed_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -105,11 +117,55 @@ class FileIndex:
             CREATE INDEX IF NOT EXISTS idx_files_content_hash ON files(content_hash);
             CREATE INDEX IF NOT EXISTS idx_files_date ON files(date);
             CREATE INDEX IF NOT EXISTS idx_files_from ON files(from_addr);
+            CREATE INDEX IF NOT EXISTS idx_files_in_reply_to ON files(in_reply_to);
+            CREATE INDEX IF NOT EXISTS idx_files_thread_id ON files(thread_id);
+            CREATE INDEX IF NOT EXISTS idx_files_thread_slug ON files(thread_slug);
 
             CREATE TABLE IF NOT EXISTS index_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
+        """)
+        self.conn.commit()
+        self._create_fts()
+
+    def _create_fts(self) -> None:
+        """Create FTS5 virtual table for full-text search."""
+        # Check if FTS table exists
+        cur = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='files_fts'"
+        )
+        if cur.fetchone():
+            return
+
+        self.conn.executescript("""
+            CREATE VIRTUAL TABLE files_fts USING fts5(
+                message_id,
+                subject,
+                body_text,
+                from_addr,
+                to_addr,
+                content='files',
+                content_rowid='id'
+            );
+
+            -- Triggers to keep FTS in sync
+            CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
+                INSERT INTO files_fts(rowid, message_id, subject, body_text, from_addr, to_addr)
+                VALUES (new.id, new.message_id, new.subject, new.body_text, new.from_addr, new.to_addr);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN
+                INSERT INTO files_fts(files_fts, rowid, message_id, subject, body_text, from_addr, to_addr)
+                VALUES ('delete', old.id, old.message_id, old.subject, old.body_text, old.from_addr, old.to_addr);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE ON files BEGIN
+                INSERT INTO files_fts(files_fts, rowid, message_id, subject, body_text, from_addr, to_addr)
+                VALUES ('delete', old.id, old.message_id, old.subject, old.body_text, old.from_addr, old.to_addr);
+                INSERT INTO files_fts(rowid, message_id, subject, body_text, from_addr, to_addr)
+                VALUES (new.id, new.message_id, new.subject, new.body_text, new.from_addr, new.to_addr);
+            END;
         """)
         self.conn.commit()
 
@@ -246,26 +302,40 @@ class FileIndex:
         date: datetime | None,
         from_addr: str,
         to_addr: str,
+        cc_addr: str,
         subject: str,
+        in_reply_to: str | None,
+        references: str | None,
+        thread_id: str | None,
+        thread_slug: str | None,
+        body_text: str | None,
         size: int,
         mtime: float,
     ) -> int:
         """Add or update a file in the index. Returns row id."""
         date_str = date.isoformat() if date else None
         cur = self.conn.execute(
-            """INSERT INTO files (path, content_hash, message_id, date, from_addr, to_addr, subject, size, mtime)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO files (path, content_hash, message_id, date, from_addr, to_addr, cc_addr,
+                                  subject, in_reply_to, references_, thread_id, thread_slug, body_text, size, mtime)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(path) DO UPDATE SET
                    content_hash = excluded.content_hash,
                    message_id = excluded.message_id,
                    date = excluded.date,
                    from_addr = excluded.from_addr,
                    to_addr = excluded.to_addr,
+                   cc_addr = excluded.cc_addr,
                    subject = excluded.subject,
+                   in_reply_to = excluded.in_reply_to,
+                   references_ = excluded.references_,
+                   thread_id = excluded.thread_id,
+                   thread_slug = excluded.thread_slug,
+                   body_text = excluded.body_text,
                    size = excluded.size,
                    mtime = excluded.mtime,
                    indexed_at = CURRENT_TIMESTAMP""",
-            (path, content_hash, message_id, date_str, from_addr, to_addr, subject, size, mtime)
+            (path, content_hash, message_id, date_str, from_addr, to_addr, cc_addr,
+             subject, in_reply_to, references, thread_id, thread_slug, body_text, size, mtime)
         )
         return cur.lastrowid or 0
 
@@ -449,6 +519,17 @@ class FileIndex:
             except Exception:
                 pass
 
+        # Threading headers
+        in_reply_to = msg.get("In-Reply-To", "").strip() or None
+        references = msg.get("References", "").strip() or None
+
+        # Compute thread_id from references chain or message_id
+        thread_id = self._compute_thread_id(message_id, in_reply_to, references)
+        thread_slug = self._compute_thread_slug(msg.get("Subject", ""), thread_id)
+
+        # Extract body text for FTS
+        body_text = self._extract_body_text(msg)
+
         self.add_file(
             path=rel_path,
             content_hash=sha,
@@ -456,11 +537,97 @@ class FileIndex:
             date=date,
             from_addr=msg.get("From", ""),
             to_addr=msg.get("To", ""),
+            cc_addr=msg.get("Cc", ""),
             subject=msg.get("Subject", ""),
+            in_reply_to=in_reply_to,
+            references=references,
+            thread_id=thread_id,
+            thread_slug=thread_slug,
+            body_text=body_text,
             size=stat.st_size,
             mtime=stat.st_mtime,
         )
         return True
+
+    def _compute_thread_id(
+        self,
+        message_id: str | None,
+        in_reply_to: str | None,
+        references: str | None,
+    ) -> str | None:
+        """Compute thread_id from message threading headers.
+
+        Thread ID is the root message-id of the thread (first in References,
+        or In-Reply-To, or the message's own ID if it's a thread root).
+        """
+        if references:
+            # First reference is the thread root
+            refs = references.split()
+            if refs:
+                return refs[0].strip("<>")
+        if in_reply_to:
+            return in_reply_to.strip("<>")
+        if message_id:
+            return message_id.strip("<>")
+        return None
+
+    def _compute_thread_slug(self, subject: str, thread_id: str | None) -> str | None:
+        """Compute URL-friendly thread slug from subject."""
+        import re
+        import hashlib
+
+        if not subject:
+            return None
+
+        # Strip Re:/Fwd: prefixes
+        clean = re.sub(r'^(Re|Fwd|Fw):\s*', '', subject, flags=re.IGNORECASE).strip()
+        if not clean:
+            clean = subject
+
+        # Convert to slug
+        slug = re.sub(r'[^a-zA-Z0-9]+', '-', clean.lower()).strip('-')[:50]
+
+        # Add hash suffix for uniqueness
+        if thread_id:
+            hash_suffix = hashlib.sha256(thread_id.encode()).hexdigest()[:8]
+            slug = f"{slug}-{hash_suffix}"
+
+        return slug or None
+
+    def _extract_body_text(self, msg) -> str | None:
+        """Extract plain text body from email for FTS indexing."""
+        body = ""
+
+        if msg.is_multipart():
+            for part in msg.walk():
+                ct = part.get_content_type()
+                if ct == "text/plain":
+                    try:
+                        # Use get_payload with decode=True for compatibility
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            charset = part.get_content_charset() or 'utf-8'
+                            try:
+                                body += payload.decode(charset, errors='replace') + "\n"
+                            except (LookupError, UnicodeDecodeError):
+                                body += payload.decode('utf-8', errors='replace') + "\n"
+                    except Exception:
+                        pass
+        else:
+            if msg.get_content_type() == "text/plain":
+                try:
+                    payload = msg.get_payload(decode=True)
+                    if payload:
+                        charset = msg.get_content_charset() or 'utf-8'
+                        try:
+                            body = payload.decode(charset, errors='replace')
+                        except (LookupError, UnicodeDecodeError):
+                            body = payload.decode('utf-8', errors='replace')
+                except Exception:
+                    pass
+
+        # Truncate to reasonable size for FTS
+        return body[:50000] if body else None
 
     def _row_to_file(self, row: sqlite3.Row) -> IndexedFile:
         """Convert database row to IndexedFile."""
@@ -486,7 +653,13 @@ class FileIndex:
             date=date,
             from_addr=row["from_addr"] or "",
             to_addr=row["to_addr"] or "",
+            cc_addr=row["cc_addr"] or "",
             subject=row["subject"] or "",
+            in_reply_to=row["in_reply_to"],
+            references=row["references_"],
+            thread_id=row["thread_id"],
+            thread_slug=row["thread_slug"],
+            body_text=row["body_text"],
             size=row["size"] or 0,
             mtime=row["mtime"] or 0.0,
             indexed_at=indexed_at,
@@ -529,3 +702,97 @@ class FileIndex:
             "git_sha": self.get_meta("git_sha"),
             "folders": folders,
         }
+
+    # -------------------------------------------------------------------------
+    # Search methods (for webapp)
+    # -------------------------------------------------------------------------
+
+    def search(
+        self,
+        query: str,
+        limit: int = 50,
+        offset: int = 0,
+        folder: str | None = None,
+    ) -> list[IndexedFile]:
+        """Full-text search over indexed files."""
+        sql = """
+            SELECT f.* FROM files f
+            JOIN files_fts fts ON f.id = fts.rowid
+            WHERE files_fts MATCH ?
+        """
+        params: list = [query]
+
+        if folder:
+            sql += " AND f.path LIKE ?"
+            params.append(f"{folder}/%")
+
+        sql += " ORDER BY f.date DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        cur = self.conn.execute(sql, params)
+        return [self._row_to_file(row) for row in cur]
+
+    def search_count(self, query: str, folder: str | None = None) -> int:
+        """Count search results."""
+        sql = """
+            SELECT COUNT(*) FROM files f
+            JOIN files_fts fts ON f.id = fts.rowid
+            WHERE files_fts MATCH ?
+        """
+        params: list = [query]
+
+        if folder:
+            sql += " AND f.path LIKE ?"
+            params.append(f"{folder}/%")
+
+        cur = self.conn.execute(sql, params)
+        return cur.fetchone()[0]
+
+    def get_thread(self, thread_id: str, limit: int = 100) -> list[IndexedFile]:
+        """Get all messages in a thread by thread_id."""
+        cur = self.conn.execute(
+            "SELECT * FROM files WHERE thread_id = ? ORDER BY date ASC LIMIT ?",
+            (thread_id, limit)
+        )
+        return [self._row_to_file(row) for row in cur]
+
+    def get_thread_by_slug(self, slug: str, limit: int = 100) -> list[IndexedFile]:
+        """Get all messages in a thread by thread_slug."""
+        cur = self.conn.execute(
+            "SELECT * FROM files WHERE thread_slug = ? ORDER BY date ASC LIMIT ?",
+            (slug, limit)
+        )
+        return [self._row_to_file(row) for row in cur]
+
+    def get_replies(self, message_id: str, limit: int = 100) -> list[IndexedFile]:
+        """Get direct replies to a message."""
+        cur = self.conn.execute(
+            "SELECT * FROM files WHERE in_reply_to LIKE ? ORDER BY date ASC LIMIT ?",
+            (f"%{message_id}%", limit)
+        )
+        return [self._row_to_file(row) for row in cur]
+
+    def get_recent(self, limit: int = 50, folder: str | None = None) -> list[IndexedFile]:
+        """Get most recently indexed files."""
+        if folder:
+            cur = self.conn.execute(
+                "SELECT * FROM files WHERE path LIKE ? ORDER BY date DESC LIMIT ?",
+                (f"{folder}/%", limit)
+            )
+        else:
+            cur = self.conn.execute(
+                "SELECT * FROM files ORDER BY date DESC LIMIT ?",
+                (limit,)
+            )
+        return [self._row_to_file(row) for row in cur]
+
+    def rebuild_fts(self) -> int:
+        """Rebuild FTS index from files table."""
+        # Delete and recreate FTS content
+        self.conn.execute("DELETE FROM files_fts")
+        cur = self.conn.execute("""
+            INSERT INTO files_fts(rowid, message_id, subject, body_text, from_addr, to_addr)
+            SELECT id, message_id, subject, body_text, from_addr, to_addr FROM files
+        """)
+        self.conn.commit()
+        return cur.rowcount

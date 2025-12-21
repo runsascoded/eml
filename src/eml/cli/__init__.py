@@ -21,7 +21,9 @@ from .account import account
 from .attachments import attachments
 from .index_cmds import backfill, fsck, index, index_fts, uids
 from .backfill_threads import backfill_threads
+from .migrate_db import rebuild_index, split_db
 from .misc import convert, folders, init, ingest, ls, migrate, tags
+from .parquet_cmds import export_uids, import_uids, uids_stats
 from .pull import pull
 from .push import push
 from .status import stats, status, web
@@ -68,6 +70,11 @@ main.add_command(status)
 main.add_command(tags)
 main.add_command(uids)
 main.add_command(web)
+main.add_command(split_db)
+main.add_command(rebuild_index)
+main.add_command(export_uids)
+main.add_command(import_uids)
+main.add_command(uids_stats)
 
 
 # Export for convenience
@@ -78,8 +85,10 @@ __all__ = [
     'backfill',
     'backfill_threads',
     'convert',
+    'export_uids',
     'folders',
     'fsck',
+    'import_uids',
     'index',
     'ingest',
     'init',
@@ -87,9 +96,12 @@ __all__ = [
     'migrate',
     'pull',
     'push',
+    'rebuild_index',
+    'split_db',
     'stats',
     'status',
     'tags',
     'uids',
+    'uids_stats',
     'web',
 ]

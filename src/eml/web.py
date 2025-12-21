@@ -23,10 +23,22 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 import uvicorn
 
 from .config import get_eml_root
+from .index import FileIndex
 from .pulls import get_pulls_db
 
 
 app = FastAPI(title="EML Status")
+
+
+def get_index_db(root: Path) -> FileIndex:
+    """Get FileIndex for the project."""
+    return FileIndex(root / ".eml")
+
+
+def extract_folder(path: str) -> str:
+    """Extract folder name from path (e.g., 'Inbox/2023/...' -> 'Inbox')."""
+    parts = path.split("/")
+    return parts[0] if parts else ""
 
 
 def get_root() -> Path:
@@ -35,6 +47,43 @@ def get_root() -> Path:
         return get_eml_root()
     except Exception:
         return Path.cwd()
+
+
+@app.get("/api/health")
+def api_health():
+    """Check database health and provide rebuild suggestions."""
+    root = get_root()
+    eml_dir = root / ".eml"
+    warnings = []
+
+    # Check index.db
+    index_db = eml_dir / "index.db"
+    if not index_db.exists():
+        warnings.append({
+            "type": "missing_index",
+            "message": "index.db not found",
+            "fix": "Run: eml rebuild-index",
+        })
+
+    # Check uids.db and parquet
+    uids_db = eml_dir / "uids.db"
+    uids_parquet = eml_dir / "uids.parquet"
+    if uids_parquet.exists() and not uids_db.exists():
+        warnings.append({
+            "type": "uids_pending_rebuild",
+            "message": "uids.db will auto-rebuild from parquet on next access",
+        })
+
+    return {
+        "ok": len(warnings) == 0,
+        "root": str(root),
+        "warnings": warnings,
+        "databases": {
+            "index_db": {"exists": index_db.exists(), "size": index_db.stat().st_size if index_db.exists() else 0},
+            "uids_db": {"exists": uids_db.exists(), "size": uids_db.stat().st_size if uids_db.exists() else 0},
+            "uids_parquet": {"exists": uids_parquet.exists(), "size": uids_parquet.stat().st_size if uids_parquet.exists() else 0},
+        },
+    }
 
 
 @app.get("/api/folders")
@@ -420,7 +469,7 @@ def api_search(
     account: str | None = None,
     folder: str | None = None,
 ):
-    """Full-text search over emails.
+    """Full-text search over emails using index.db.
 
     The query supports FTS5 syntax:
     - Simple terms: `meeting report`
@@ -432,12 +481,10 @@ def api_search(
     Returns paginated results with total count for pagination UI.
     """
     root = get_root()
-    with get_pulls_db(root) as db:
+    with get_index_db(root) as db:
         try:
-            total = db.search_count(query=q, account=account, folder=folder)
-            results = db.search(
-                query=q, limit=limit, offset=offset, account=account, folder=folder
-            )
+            total = db.search_count(query=q, folder=folder)
+            results = db.search(query=q, limit=limit, offset=offset, folder=folder)
         except Exception as e:
             return JSONResponse({"error": f"Search error: {e}"}, status_code=400)
 
@@ -449,15 +496,15 @@ def api_search(
             "limit": limit,
             "results": [
                 {
-                    "account": m.account,
-                    "folder": m.folder,
-                    "uid": m.uid,
+                    "folder": extract_folder(m.path),
                     "message_id": m.message_id,
                     "subject": m.subject,
-                    "local_path": m.local_path,
-                    "msg_date": m.msg_date,
+                    "local_path": m.path,
+                    "msg_date": m.date.isoformat() if m.date else None,
                     "from_addr": m.from_addr,
                     "to_addr": m.to_addr,
+                    "thread_id": m.thread_id,
+                    "thread_slug": m.thread_slug,
                 }
                 for m in results
             ],
@@ -468,16 +515,23 @@ def api_search(
 def api_thread(message_id: str, limit: int = 100):
     """Get all messages in a thread by Message-ID.
 
-    Returns messages that:
-    - Have this message_id
-    - Reply to this message_id (via In-Reply-To)
-    - Reference this message_id (via References)
+    First looks up the thread_id from message_id, then retrieves all messages
+    in that thread using index.db.
     """
     root = get_root()
-    with get_pulls_db(root) as db:
-        messages = db.get_thread(message_id=message_id, limit=limit)
-        # Get thread_id and thread_slug from first message (they all share the same)
-        thread_id = messages[0].thread_id if messages else None
+    with get_index_db(root) as db:
+        # First, find the message by message_id to get its thread_id
+        file = db.get_by_message_id(message_id)
+        if not file:
+            return JSONResponse({"error": f"Message not found: {message_id}"}, status_code=404)
+
+        thread_id = file.thread_id
+        if not thread_id:
+            # No thread, return just this message
+            messages = [file]
+        else:
+            messages = db.get_thread(thread_id=thread_id, limit=limit)
+
         thread_slug = messages[0].thread_slug if messages else None
         return {
             "message_id": message_id,
@@ -486,15 +540,13 @@ def api_thread(message_id: str, limit: int = 100):
             "count": len(messages),
             "messages": [
                 {
-                    "account": m.account,
-                    "folder": m.folder,
-                    "uid": m.uid,
+                    "folder": extract_folder(m.path),
                     "subject": m.subject,
                     "message_id": m.message_id,
                     "thread_id": m.thread_id,
                     "thread_slug": m.thread_slug,
-                    "local_path": m.local_path,
-                    "msg_date": m.msg_date,
+                    "local_path": m.path,
+                    "msg_date": m.date.isoformat() if m.date else None,
                     "in_reply_to": m.in_reply_to,
                     "references": m.references,
                     "from_addr": m.from_addr,
@@ -507,13 +559,13 @@ def api_thread(message_id: str, limit: int = 100):
 
 @app.get("/api/thread-by-id/{thread_id:path}")
 def api_thread_by_id(thread_id: str, limit: int = 100):
-    """Get all messages in a thread by thread_id directly.
+    """Get all messages in a thread by thread_id directly using index.db.
 
     This is more efficient than /api/thread which looks up by message_id first.
     """
     root = get_root()
-    with get_pulls_db(root) as db:
-        messages = db.get_thread_by_id(thread_id=thread_id, limit=limit)
+    with get_index_db(root) as db:
+        messages = db.get_thread(thread_id=thread_id, limit=limit)
         thread_slug = messages[0].thread_slug if messages else None
         return {
             "thread_id": thread_id,
@@ -521,15 +573,13 @@ def api_thread_by_id(thread_id: str, limit: int = 100):
             "count": len(messages),
             "messages": [
                 {
-                    "account": m.account,
-                    "folder": m.folder,
-                    "uid": m.uid,
+                    "folder": extract_folder(m.path),
                     "subject": m.subject,
                     "message_id": m.message_id,
                     "thread_id": m.thread_id,
                     "thread_slug": m.thread_slug,
-                    "local_path": m.local_path,
-                    "msg_date": m.msg_date,
+                    "local_path": m.path,
+                    "msg_date": m.date.isoformat() if m.date else None,
                     "in_reply_to": m.in_reply_to,
                     "references": m.references,
                     "from_addr": m.from_addr,
@@ -562,12 +612,12 @@ def count_attachments(root: Path, local_path: str | None) -> int:
 
 @app.get("/api/thread-by-slug/{slug}")
 def api_thread_by_slug(slug: str, limit: int = 100):
-    """Get all messages in a thread by thread_slug.
+    """Get all messages in a thread by thread_slug using index.db.
 
     This is the preferred endpoint for thread URLs.
     """
     root = get_root()
-    with get_pulls_db(root) as db:
+    with get_index_db(root) as db:
         messages = db.get_thread_by_slug(slug=slug, limit=limit)
         if not messages:
             return JSONResponse({"error": "Thread not found"}, status_code=404)
@@ -577,20 +627,18 @@ def api_thread_by_slug(slug: str, limit: int = 100):
             "count": len(messages),
             "messages": [
                 {
-                    "account": m.account,
-                    "folder": m.folder,
-                    "uid": m.uid,
+                    "folder": extract_folder(m.path),
                     "subject": m.subject,
                     "message_id": m.message_id,
                     "thread_id": m.thread_id,
                     "thread_slug": m.thread_slug,
-                    "local_path": m.local_path,
-                    "msg_date": m.msg_date,
+                    "local_path": m.path,
+                    "msg_date": m.date.isoformat() if m.date else None,
                     "in_reply_to": m.in_reply_to,
                     "references": m.references,
                     "from_addr": m.from_addr,
                     "to_addr": m.to_addr,
-                    "attachment_count": count_attachments(root, m.local_path),
+                    "attachment_count": count_attachments(root, m.path),
                 }
                 for m in messages
             ],
@@ -599,21 +647,19 @@ def api_thread_by_slug(slug: str, limit: int = 100):
 
 @app.get("/api/replies/{message_id:path}")
 def api_replies(message_id: str, limit: int = 100):
-    """Get direct replies to a message."""
+    """Get direct replies to a message using index.db."""
     root = get_root()
-    with get_pulls_db(root) as db:
+    with get_index_db(root) as db:
         messages = db.get_replies(message_id=message_id, limit=limit)
         return {
             "message_id": message_id,
             "count": len(messages),
             "replies": [
                 {
-                    "account": m.account,
-                    "folder": m.folder,
-                    "uid": m.uid,
+                    "folder": extract_folder(m.path),
                     "message_id": m.message_id,
-                    "local_path": m.local_path,
-                    "msg_date": m.msg_date,
+                    "local_path": m.path,
+                    "msg_date": m.date.isoformat() if m.date else None,
                     "in_reply_to": m.in_reply_to,
                     "from_addr": m.from_addr,
                     "to_addr": m.to_addr,
@@ -625,10 +671,10 @@ def api_replies(message_id: str, limit: int = 100):
 
 @app.post("/api/fts/rebuild")
 def api_rebuild_fts():
-    """Rebuild the full-text search index from pulled_messages."""
+    """Rebuild the full-text search index from index.db."""
     root = get_root()
-    with get_pulls_db(root) as db:
-        count = db.rebuild_fts_index()
+    with get_index_db(root) as db:
+        count = db.rebuild_fts()
         return {"status": "ok", "indexed": count}
 
 

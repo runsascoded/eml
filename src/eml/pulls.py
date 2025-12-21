@@ -3,12 +3,12 @@
 This module provides robust per-UID tracking for email pulls, replacing the
 fragile `last_uid` approach that lost track of gaps from failed fetches.
 
-The pulls.db file is Git-tracked, enabling:
-- Resume across sessions/machines
-- Exact knowledge of which UIDs we've fetched
-- Retry only truly missing UIDs (not re-fetch successes)
-- Survive UIDVALIDITY changes via content_hash fallback
-- Track server state for set operations (what's on server vs local)
+Database architecture (post-migration):
+- uids.db: Critical UID tracking (Git-tracked, ~40MB for 65k messages)
+- pulls.db: Legacy database with metadata+FTS (being phased out)
+- index.db: File-based index (regenerable from .eml files)
+
+For new installations, use `eml split-db` to migrate from pulls.db to uids.db.
 """
 
 import base64
@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from .uids import UidsDB, UIDS_DB
 
 PULLS_DB = "pulls.db"
 
@@ -129,8 +130,11 @@ class RecentPull:
 class PullsDB:
     """Persistent SQLite database tracking pulled messages by UID.
 
-    This is the authoritative record of which messages we've successfully
-    fetched from each server. Git-tracked for durability.
+    This class manages both legacy pulls.db and the new split database
+    architecture (uids.db + pulls.db for metadata).
+
+    When uids.db exists, UID operations are delegated to UidsDB.
+    When only pulls.db exists, it operates in legacy mode.
     """
 
     def __init__(self, eml_dir: Path):
@@ -141,22 +145,40 @@ class PullsDB:
         """
         self._eml_dir = eml_dir
         self._db_path = eml_dir / PULLS_DB
+        self._uids_db_path = eml_dir / UIDS_DB
         self._conn: sqlite3.Connection | None = None
+        self._uids_db: UidsDB | None = None
 
     @property
     def db_path(self) -> Path:
         return self._db_path
 
+    @property
+    def has_uids_db(self) -> bool:
+        """Check if split database architecture is in use."""
+        return self._uids_db_path.exists()
+
     def connect(self) -> None:
         """Open database connection and create schema if needed."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self._db_path, timeout=30.0)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._create_schema()
+
+        # Use uids.db for UID operations if it exists
+        if self._uids_db_path.exists():
+            self._uids_db = UidsDB(self._eml_dir)
+            self._uids_db.connect()
+
+        # Still connect to pulls.db for metadata/FTS (if it exists)
+        if self._db_path.exists():
+            self._conn = sqlite3.connect(self._db_path, timeout=30.0)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._create_schema()
 
     def disconnect(self) -> None:
         """Close database connection."""
+        if self._uids_db:
+            self._uids_db.disconnect()
+            self._uids_db = None
         if self._conn:
             self._conn.close()
             self._conn = None
@@ -164,8 +186,13 @@ class PullsDB:
     @property
     def conn(self) -> sqlite3.Connection:
         if not self._conn:
-            raise RuntimeError("Not connected")
+            raise RuntimeError("Not connected to pulls.db")
         return self._conn
+
+    @property
+    def uids_db(self) -> UidsDB | None:
+        """Get UidsDB instance if split architecture is in use."""
+        return self._uids_db
 
     def __enter__(self):
         self.connect()
@@ -425,26 +452,43 @@ class PullsDB:
             to_addr: To header (for search)
             body_text: Plain text body (for FTS only, not stored in pulled_messages)
         """
-        ts = (pulled_at or datetime.now()).isoformat()
-        thread_id = compute_thread_id(message_id, references, in_reply_to)
-        thread_slug = self._get_or_create_thread_slug(thread_id) if thread_id else None
-        self.conn.execute("""
-            INSERT OR REPLACE INTO pulled_messages
-                (account, folder, uidvalidity, uid, content_hash, message_id, local_path, pulled_at,
-                 subject, msg_date, status, sync_run_id, error_message,
-                 in_reply_to, references_, thread_id, thread_slug, from_addr, to_addr)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            account, folder, uidvalidity, uid, content_hash,
-            message_id, local_path, ts, subject, msg_date, status, sync_run_id, error_message,
-            in_reply_to, references, thread_id, thread_slug, from_addr, to_addr
-        ))
+        ts_dt = pulled_at or datetime.now()
+        ts = ts_dt.isoformat()
 
-        # Incremental FTS indexing - add to search index immediately
-        if status != "failed":
-            self.insert_fts(message_id, subject, body_text, from_addr, to_addr)
+        # Record to UidsDB if available (critical UID tracking)
+        if self._uids_db and status != "failed":
+            self._uids_db.record_pull(
+                account=account,
+                folder=folder,
+                uidvalidity=uidvalidity,
+                uid=uid,
+                content_hash=content_hash,
+                message_id=message_id,
+                local_path=local_path,
+                pulled_at=ts_dt,
+            )
 
-        self.conn.commit()
+        # Also record to pulls.db for metadata/FTS if it exists
+        if self._conn:
+            thread_id = compute_thread_id(message_id, references, in_reply_to)
+            thread_slug = self._get_or_create_thread_slug(thread_id) if thread_id else None
+            self.conn.execute("""
+                INSERT OR REPLACE INTO pulled_messages
+                    (account, folder, uidvalidity, uid, content_hash, message_id, local_path, pulled_at,
+                     subject, msg_date, status, sync_run_id, error_message,
+                     in_reply_to, references_, thread_id, thread_slug, from_addr, to_addr)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                account, folder, uidvalidity, uid, content_hash,
+                message_id, local_path, ts, subject, msg_date, status, sync_run_id, error_message,
+                in_reply_to, references, thread_id, thread_slug, from_addr, to_addr
+            ))
+
+            # Incremental FTS indexing - add to search index immediately
+            if status != "failed":
+                self.insert_fts(message_id, subject, body_text, from_addr, to_addr)
+
+            self.conn.commit()
 
     def record_pulls_batch(
         self,
@@ -479,6 +523,9 @@ class PullsDB:
         Returns:
             Set of UIDs that have been successfully pulled
         """
+        # Delegate to UidsDB if available
+        if self._uids_db:
+            return self._uids_db.get_pulled_uids(account, folder, uidvalidity)
         cur = self.conn.execute("""
             SELECT uid FROM pulled_messages
             WHERE account = ? AND folder = ? AND uidvalidity = ?
@@ -501,6 +548,9 @@ class PullsDB:
         Returns:
             Number of pulled messages
         """
+        # Delegate to UidsDB if available
+        if self._uids_db:
+            return self._uids_db.get_pulled_count(account, folder, uidvalidity)
         if uidvalidity is not None:
             cur = self.conn.execute("""
                 SELECT COUNT(*) FROM pulled_messages
@@ -515,6 +565,9 @@ class PullsDB:
 
     def has_content_hash(self, content_hash: str) -> bool:
         """Check if we've pulled a message with this content hash (any account/folder)."""
+        # Delegate to UidsDB if available
+        if self._uids_db:
+            return self._uids_db.has_content_hash(content_hash)
         cur = self.conn.execute(
             "SELECT 1 FROM pulled_messages WHERE content_hash = ? LIMIT 1",
             (content_hash,)
@@ -523,6 +576,9 @@ class PullsDB:
 
     def get_all_content_hashes(self) -> set[str]:
         """Get all content hashes we've ever pulled."""
+        # Delegate to UidsDB if available
+        if self._uids_db:
+            return self._uids_db.get_all_content_hashes()
         cur = self.conn.execute("SELECT DISTINCT content_hash FROM pulled_messages")
         return {row["content_hash"] for row in cur}
 
@@ -535,6 +591,9 @@ class PullsDB:
         Returns:
             Dict with counts per folder, total, etc.
         """
+        # Delegate to UidsDB if available
+        if self._uids_db:
+            return self._uids_db.get_stats(account)
         stats: dict = {"total": 0, "folders": {}}
 
         if account:
@@ -566,6 +625,9 @@ class PullsDB:
 
         Returns None if no records exist for this account/folder.
         """
+        # Delegate to UidsDB if available
+        if self._uids_db:
+            return self._uids_db.get_uidvalidity(account, folder)
         cur = self.conn.execute("""
             SELECT DISTINCT uidvalidity FROM pulled_messages
             WHERE account = ? AND folder = ?
@@ -605,6 +667,10 @@ class PullsDB:
             uidvalidity: IMAP UIDVALIDITY value
             uid_message_ids: List of (uid, message_id) tuples
         """
+        # Delegate to UidsDB if available
+        if self._uids_db:
+            self._uids_db.record_server_uids(account, folder, uidvalidity, uid_message_ids)
+            return
         now = datetime.now().isoformat()
         self.conn.executemany("""
             INSERT OR REPLACE INTO server_uids
@@ -621,6 +687,10 @@ class PullsDB:
         message_count: int,
     ) -> None:
         """Record server folder metadata."""
+        # Delegate to UidsDB if available
+        if self._uids_db:
+            self._uids_db.record_server_folder(account, folder, uidvalidity, message_count)
+            return
         self.conn.execute("""
             INSERT OR REPLACE INTO server_folders
                 (account, folder, uidvalidity, message_count, last_checked)
@@ -634,6 +704,9 @@ class PullsDB:
         Returns:
             List of (account, folder, pull_count) tuples
         """
+        # Delegate to UidsDB if available
+        if self._uids_db:
+            return self._uids_db.get_folders_with_activity(account)
         if account:
             cur = self.conn.execute("""
                 SELECT account, folder, COUNT(*) as cnt
@@ -658,6 +731,9 @@ class PullsDB:
         uidvalidity: int,
     ) -> set[int]:
         """Get all UIDs we've seen on server for this folder."""
+        # Delegate to UidsDB if available
+        if self._uids_db:
+            return self._uids_db.get_server_uids(account, folder, uidvalidity)
         cur = self.conn.execute("""
             SELECT uid FROM server_uids
             WHERE account = ? AND folder = ? AND uidvalidity = ?
@@ -666,6 +742,9 @@ class PullsDB:
 
     def get_server_uid_count(self, account: str, folder: str) -> int:
         """Get count of UIDs tracked for server folder."""
+        # Delegate to UidsDB if available
+        if self._uids_db:
+            return self._uids_db.get_server_uid_count(account, folder)
         cur = self.conn.execute("""
             SELECT COUNT(*) FROM server_uids
             WHERE account = ? AND folder = ?
@@ -679,6 +758,9 @@ class PullsDB:
         uidvalidity: int,
     ) -> set[int]:
         """Get UIDs that are on server but not pulled."""
+        # Delegate to UidsDB if available
+        if self._uids_db:
+            return self._uids_db.get_unpulled_uids(account, folder, uidvalidity)
         cur = self.conn.execute("""
             SELECT s.uid FROM server_uids s
             LEFT JOIN pulled_messages p
@@ -698,6 +780,9 @@ class PullsDB:
         uidvalidity: int,
     ) -> set[int]:
         """Get server UIDs that have no Message-ID."""
+        # Delegate to UidsDB if available
+        if self._uids_db:
+            return self._uids_db.get_uids_without_message_id(account, folder, uidvalidity)
         cur = self.conn.execute("""
             SELECT uid FROM server_uids
             WHERE account = ? AND folder = ? AND uidvalidity = ?
@@ -897,6 +982,9 @@ class PullsDB:
         Returns:
             Number of records deleted
         """
+        # Delegate to UidsDB if available
+        if self._uids_db:
+            return self._uids_db.clear_folder(account, folder, uidvalidity)
         if uidvalidity is not None:
             cur = self.conn.execute("""
                 DELETE FROM pulled_messages
