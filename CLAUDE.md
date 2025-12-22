@@ -24,7 +24,8 @@ Project structure:
 - `src/eml/layouts/` - `StorageLayout` protocol, `TreeLayout`, `SqliteLayout`
 - `src/eml/layouts/path_template.py` - `PathTemplate` for flexible file paths
 - `src/eml/imap.py` - `GmailClient`, `ZohoClient`, `IMAPClient`
-- `www/app.py` - Flask pmail web UI
+- `src/eml/web.py` - Starlette API backend (`eml serve`)
+- `ui/` - React frontend (Vite, TypeScript)
 
 ## Command Aliases
 

@@ -101,14 +101,44 @@ def api_folders(account: str | None = None):
 
 
 @app.get("/api/status")
-def api_status(account: str = "y", folder: str = "Inbox"):
-    """Get UID status summary."""
+def api_status(account: str = "y", folder: str | None = None):
+    """Get UID status summary. If folder is None, aggregate across all folders."""
     root = get_root()
     pulls_db_path = root / ".eml" / "pulls.db"
     if not pulls_db_path.exists():
         return JSONResponse({"error": "No pulls.db found"}, status_code=404)
 
     with get_pulls_db(root) as db:
+        if folder is None:
+            # Aggregate across all folders for this account
+            cur = db.conn.execute(
+                "SELECT SUM(cnt) FROM (SELECT COUNT(*) as cnt FROM server_uids WHERE account = ? GROUP BY folder)",
+                (account,)
+            )
+            server_count = cur.fetchone()[0] or 0
+
+            cur = db.conn.execute(
+                "SELECT SUM(cnt) FROM (SELECT COUNT(*) as cnt FROM pulled_messages WHERE account = ? GROUP BY folder)",
+                (account,)
+            )
+            pulled_count = cur.fetchone()[0] or 0
+
+            # For aggregated view, we can't easily compute unpulled without iterating folders
+            # Just show the difference
+            unpulled_count = max(0, server_count - pulled_count)
+
+            return {
+                "account": account,
+                "folder": None,
+                "uidvalidity": None,
+                "server_uids": server_count,
+                "pulled_uids": pulled_count,
+                "unpulled_uids": unpulled_count,
+                "no_message_id": 0,
+                "timestamp": datetime.now().isoformat(),
+            }
+
+        # Single folder case
         uidvalidity = db.get_uidvalidity(account, folder)
         if not uidvalidity:
             # Try server_folders
