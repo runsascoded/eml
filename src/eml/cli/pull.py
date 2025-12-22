@@ -144,12 +144,13 @@ def pull(
                 storage.connect()
 
         # Open pulls.db for tracking (Git-tracked, per-UID records)
+        # Also open in dry-run mode for UID caching (metadata only, safe)
         pulls_db: PullsDB | None = None
         pulled_uids: set[int] = set()
         stored_uidvalidity: int | None = None
         sync_run_id: int | None = None
 
-        if has_cfg and not dry_run:
+        if has_cfg:
             pulls_db = get_pulls_db(root)
             pulls_db.connect()
             # Check for UIDVALIDITY change
@@ -207,8 +208,8 @@ def pull(
             all_server_uids = client.search("ALL")
             echo(f"Server has {len(all_server_uids):,} messages")
 
-            # Cache the UIDs for next time
-            if pulls_db and uidvalidity and not dry_run:
+            # Cache the UIDs for next time (always cache, even in dry-run)
+            if pulls_db and uidvalidity:
                 uid_list = [(int(u), None) for u in all_server_uids]
                 pulls_db.record_server_uids(account, src_folder, uidvalidity, uid_list)
                 pulls_db.record_server_folder(account, src_folder, uidvalidity, len(all_server_uids))
@@ -514,9 +515,10 @@ def pull(
             echo(style("Note: Aborted early due to rate limiting. Retry later.", fg="yellow"))
 
         # Cleanup
+        # Always disconnect pulls_db (opened in dry-run mode too for UID caching)
+        if pulls_db:
+            pulls_db.disconnect()
         if not dry_run:
-            if pulls_db:
-                pulls_db.disconnect()
             if file_index:
                 file_index.conn.commit()
                 file_index.disconnect()
