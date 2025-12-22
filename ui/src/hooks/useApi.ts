@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import type { Folder, FolderDetail, PullActivity, UIDStatus, SyncStatus, HistogramData, SyncRun, SyncRunMessage } from '../types'
+import type { Folder, FolderDetail, PullActivity, UIDStatus, SyncStatus, HistogramData, SyncRun, SyncRunMessage, FolderStatsResponse } from '../types'
 
 export function useFolders() {
   const [folders, setFolders] = useState<Folder[]>([])
@@ -230,4 +230,21 @@ export function useFolderDetail(account: string | null, folder: string | null) {
   }, [refresh])
 
   return { data, loading, refresh }
+}
+
+export function useFolderStats(account: string | null) {
+  const [data, setData] = useState<FolderStatsResponse | null>(null)
+
+  const refresh = useCallback(async () => {
+    if (!account) return
+    const res = await fetch(`/api/folder-stats?account=${account}`)
+    const d = await res.json()
+    setData(d)
+  }, [account])
+
+  useEffect(() => {
+    refresh()
+  }, [refresh])
+
+  return { data, refresh }
 }

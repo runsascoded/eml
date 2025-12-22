@@ -9,9 +9,10 @@ interface Props {
   onSelect?: (account: string, folder: string | null) => void
   linkMode?: boolean
   showAll?: boolean  // Show "All" option
+  dropdownMode?: boolean  // Use dropdown instead of buttons
 }
 
-export function FolderNav({ folders, currentAccount, currentFolder, onSelect, linkMode = false, showAll = false }: Props) {
+export function FolderNav({ folders, currentAccount, currentFolder, onSelect, linkMode = false, showAll = false, dropdownMode = false }: Props) {
   if (folders.length === 0) {
     return <div className="folder-nav"><span className="no-folders">No folders found</span></div>
   }
@@ -20,6 +21,35 @@ export function FolderNav({ folders, currentAccount, currentFolder, onSelect, li
   const totalCount = folders
     .filter(f => f.account === currentAccount)
     .reduce((sum, f) => sum + f.count, 0)
+
+  // Dropdown mode - compact select element
+  if (dropdownMode && currentAccount) {
+    const handleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+      const value = e.target.value
+      if (value === '__all__') {
+        onSelect?.(currentAccount, null)
+      } else {
+        onSelect?.(currentAccount, value)
+      }
+    }
+
+    return (
+      <div className="folder-nav folder-nav--dropdown">
+        <select
+          className="folder-select"
+          value={currentFolder ?? '__all__'}
+          onChange={handleChange}
+        >
+          {showAll && <option value="__all__">All folders ({totalCount.toLocaleString()})</option>}
+          {folders.map((f) => (
+            <option key={f.folder} value={f.folder}>
+              {f.folder} ({f.count.toLocaleString()})
+            </option>
+          ))}
+        </select>
+      </div>
+    )
+  }
 
   return (
     <div className="folder-nav">

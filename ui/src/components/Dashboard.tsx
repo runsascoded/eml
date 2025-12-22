@@ -3,11 +3,12 @@ import { Link } from 'react-router-dom'
 import { FolderNav } from './FolderNav'
 import { SyncStatusBar } from './SyncStatusBar'
 import { UIDSummary } from './UIDSummary'
+import { FolderStats } from './FolderStats'
 import { Histogram } from './Histogram'
 import { RecentActivity } from './RecentActivity'
 import { SyncRunsList } from './SyncRunsList'
 import { Search } from './Search'
-import { useFolders, useStatus, useRecent, useHistogram, useSyncStatus, useSyncRuns, useSSE } from '../hooks/useApi'
+import { useFolders, useStatus, useRecent, useHistogram, useSyncStatus, useSyncRuns, useSSE, useFolderStats } from '../hooks/useApi'
 import type { UIDStatus, PullActivity, SyncStatus } from '../types'
 
 export function Dashboard() {
@@ -29,6 +30,7 @@ export function Dashboard() {
   const { data: histogramData } = useHistogram(account, folder)
   const { sync, refresh: refreshSync } = useSyncStatus()
   const { runs } = useSyncRuns(5)
+  const { data: folderStats } = useFolderStats(account)
 
   const handleFolderSelect = useCallback((acc: string, fld: string | null) => {
     setAccount(acc)
@@ -68,6 +70,7 @@ export function Dashboard() {
         currentFolder={folder}
         onSelect={handleFolderSelect}
         showAll
+        dropdownMode
       />
       <SyncStatusBar sync={sync} />
       <div className="card">
@@ -81,7 +84,15 @@ export function Dashboard() {
         </div>
         <div className="card">
           <h2>UID Summary</h2>
-          <UIDSummary status={status} />
+          {folder === null ? (
+            folderStats?.folders ? (
+              <FolderStats folders={folderStats.folders} />
+            ) : (
+              <p className="muted">Loading folder stats...</p>
+            )
+          ) : (
+            <UIDSummary status={status} />
+          )}
         </div>
         <div className="card">
           <h2>Activity by Hour (last 24h)</h2>

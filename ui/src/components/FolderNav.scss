@@ -42,3 +42,30 @@
   color: var(--text-muted);
   margin-left: $spacing-xs;
 }
+
+.folder-nav--dropdown {
+  display: inline-block;
+}
+
+.folder-select {
+  padding: $spacing-xs 12px;
+  border-radius: $radius-md;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: $font-size-sm;
+  font-family: inherit;
+  min-width: 180px;
+  transition: all 0.2s ease;
+
+  &:hover {
+    border-color: var(--accent);
+  }
+
+  &:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.2);
+  }
+}

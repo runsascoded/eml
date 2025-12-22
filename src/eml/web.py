@@ -169,6 +169,66 @@ def api_status(account: str = "y", folder: str | None = None):
         }
 
 
+@app.get("/api/folder-stats")
+def api_folder_stats(account: str = "y"):
+    """Get per-folder UID stats: pulled vs server counts for each folder."""
+    root = get_root()
+    pulls_db_path = root / ".eml" / "pulls.db"
+    uids_db_path = root / ".eml" / "uids.db"
+    if not pulls_db_path.exists() and not uids_db_path.exists():
+        return JSONResponse({"error": "No pulls.db or uids.db found"}, status_code=404)
+
+    with get_pulls_db(root) as db:
+        # Determine which connection to use for UID queries
+        # PullsDB delegates to UidsDB when uids.db exists
+        uids_conn = db.uids_db.conn if db.uids_db else db.conn
+
+        # Get pulled counts per folder (from uids.db if available)
+        cur = uids_conn.execute(
+            """
+            SELECT folder, COUNT(*) as pulled
+            FROM pulled_uids
+            WHERE account = ?
+            GROUP BY folder
+            ORDER BY pulled DESC
+            """,
+            (account,)
+        )
+        pulled_by_folder = {row["folder"]: row["pulled"] for row in cur.fetchall()}
+
+        # Get server UID counts per folder (from uids.db if available)
+        cur = uids_conn.execute(
+            """
+            SELECT folder, COUNT(*) as server
+            FROM server_uids
+            WHERE account = ?
+            GROUP BY folder
+            """,
+            (account,)
+        )
+        server_by_folder = {row["folder"]: row["server"] for row in cur.fetchall()}
+
+        # Combine into list
+        all_folders = set(pulled_by_folder.keys()) | set(server_by_folder.keys())
+        stats = []
+        for folder in sorted(all_folders):
+            pulled = pulled_by_folder.get(folder, 0)
+            server = server_by_folder.get(folder, 0)
+            stats.append({
+                "folder": folder,
+                "pulled": pulled,
+                "server": server,
+            })
+
+        # Sort by pulled count descending
+        stats.sort(key=lambda x: x["pulled"], reverse=True)
+
+        return {
+            "account": account,
+            "folders": stats,
+        }
+
+
 @app.get("/api/histogram")
 def api_histogram(account: str | None = None, folder: str | None = None, hours: int = 24):
     """Get hourly activity histogram with new vs deduped vs failed breakdown."""

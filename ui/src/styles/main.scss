@@ -123,3 +123,32 @@ h1 {
   color: var(--text-muted);
   font-size: $font-size-xs;
 }
+
+.folder-stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: $font-size-sm;
+
+  th, td {
+    padding: $spacing-xs $spacing-sm;
+    text-align: left;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  th {
+    color: var(--text-secondary);
+    font-weight: 500;
+  }
+
+  .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  tfoot {
+    td {
+      border-top: 2px solid var(--border-color);
+      border-bottom: none;
+    }
+  }
+}

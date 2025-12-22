@@ -203,3 +203,14 @@ export interface ThreadResponse {
   count: number
   messages: ThreadMessage[]
 }
+
+export interface FolderStat {
+  folder: string
+  pulled: number
+  server: number
+}
+
+export interface FolderStatsResponse {
+  account: string
+  folders: FolderStat[]
+}
